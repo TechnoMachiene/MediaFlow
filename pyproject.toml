@@ -1,0 +1,25 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+  # noise from inside google-genai on Python 3.14; not our code
+  "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning",
+]
+markers = [
+  "unit: fast, no services",
+  "integration: needs real Redis (REDIS_URL)",
+  "live: calls real Gemini (RUN_LIVE=1 + GEMINI_API_KEY + GEMINI_MODEL)",
+]
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

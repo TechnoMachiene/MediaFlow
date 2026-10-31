@@ -1,0 +1,494 @@
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Annotated, Literal
+
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.responses import FileResponse
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+
+from app.api.database import ApiJob, MediaAsset, User
+from app.api.dependencies import CurrentUser, DbSession, QueueRuntime
+from app.api.media_storage import resolve_media_path, store_media_asset
+from app.api.schemas import (
+    ApprovalDecision,
+    Credentials,
+    JobPage,
+    JobResponse,
+    JobView,
+    RoleUpdate,
+    StatsResponse,
+    TokenResponse,
+    UserCreate,
+    UserPage,
+    UserView,
+)
+from app.api.security import create_access_token, hash_password, verify_password
+from app.errors import MediaError
+from app.media import ALLOWED, inspect_media
+
+router = APIRouter(prefix="/api/v1")
+JOB_RESULT_WAIT_S = 5 * 60
+JOB_RESULT_POLL_S = 0.25
+
+
+def _token(request: Request, user_id: str) -> TokenResponse:
+    cfg = request.app.state.api_settings
+    return TokenResponse(
+        access_token=create_access_token(user_id, cfg.jwt_secret, cfg.token_ttl_minutes),
+        expires_in=cfg.token_ttl_minutes * 60,
+    )
+
+
+@router.post("/users", response_model=UserView, status_code=status.HTTP_201_CREATED)
+def create_user(
+    payload: UserCreate,
+    actor: CurrentUser,
+    db: DbSession,
+):
+    if actor.role not in {"manager", "admin"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only managers and admins can create users")
+    if actor.role == "manager" and payload.role != "user":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Managers can only create user accounts")
+    user = User(
+        email=str(payload.email),
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "An account with that email already exists",
+        ) from None
+    db.refresh(user)
+    return UserView(id=user.id, email=user.email, role=user.role, created_at=user.created_at)
+
+
+@router.get("/users", response_model=UserPage)
+def list_users(
+    actor: CurrentUser,
+    db: DbSession,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    if actor.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    rows = db.scalars(
+        select(User).order_by(User.created_at.desc(), User.id).limit(limit).offset(offset)
+    ).all()
+    return UserPage(
+        items=[
+            UserView(id=row.id, email=row.email, role=row.role, created_at=row.created_at)
+            for row in rows
+        ],
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.patch("/users/{user_id}/role", response_model=UserView)
+def update_user_role(
+    user_id: str,
+    payload: RoleUpdate,
+    actor: CurrentUser,
+    db: DbSession,
+):
+    if actor.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if user.role == "admin" and payload.role != "admin":
+        admin_count = db.scalar(select(func.count()).select_from(User).where(User.role == "admin"))
+        if admin_count <= 1:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cannot demote the last admin")
+    user.role = payload.role
+    db.commit()
+    db.refresh(user)
+    return UserView(id=user.id, email=user.email, role=user.role, created_at=user.created_at)
+
+
+@router.post("/auth/login", response_model=TokenResponse)
+def login(payload: Credentials, request: Request, db: DbSession):
+    user = db.scalar(select(User).where(User.email == str(payload.email)))
+    if user is None or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return _token(request, user.id)
+
+
+def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) -> JobView:
+    live_status = data.get("status", "unknown")
+    if live_status == "unknown":
+        live_status = "done" if row.result is not None else "expired"
+    result = data.get("result")
+    if result is None:
+        result = row.result
+    if result is not None:
+        live_status = "done"
+    row.status = live_status
+    if result is not None:
+        row.result = result
+    return JobView(
+        job_id=row.id,
+        status=live_status,
+        approval_status=row.approval_status,
+        submitter_email=submitter_email,
+        original_filename=row.filename,
+        attempts=data.get("attempts", 0),
+        cached=data.get("cached", False),
+        error=data.get("error"),
+        result=result,
+        filename=row.filename,
+        media_kind=row.media_kind,
+        media_url=f"/api/v1/jobs/{row.id}/media",
+        created_at=row.created_at,
+    )
+
+
+@router.post(
+    "/jobs",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        status.HTTP_200_OK: {
+            "model": JobResponse,
+            "description": "Job completed during the response wait",
+        },
+        status.HTTP_502_BAD_GATEWAY: {
+            "model": JobResponse,
+            "description": "The worker or Gemini could not process the media",
+        },
+    },
+)
+def upload_job(
+    request: Request,
+    response: Response,
+    file: Annotated[UploadFile, File()],
+    user: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+):
+    original_name = (file.filename or "upload").replace("\\", "/").rsplit("/", 1)[-1]
+    suffix = Path(original_name).suffix.lower()
+    media = ALLOWED.get(suffix)
+    if media is None:
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            "Unsupported image/video file type",
+        )
+    kind, _ = media
+    settings = runtime.settings
+    max_bytes = (
+        settings.max_image_mb if kind == "image" else settings.max_video_upload_mb
+    ) * 1024 * 1024
+    job_id = uuid.uuid4().hex
+    storage_dir: Path = request.app.state.api_settings.media_storage_dir
+    storage_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
+    staged_path = storage_dir / f".upload-{uuid.uuid4().hex}{suffix}"
+
+    size = 0
+    try:
+        with staged_path.open("xb") as target:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(
+                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        "Upload exceeds the configured size limit",
+                    )
+                target.write(chunk)
+        os.chmod(staged_path, 0o600)
+        if size == 0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Uploaded file is empty")
+        inspect_media(
+            str(staged_path),
+            max_image_mb=settings.max_image_mb,
+            max_video_mb=settings.max_video_upload_mb,
+        )
+
+        media_sha256 = store_media_asset(db, staged_path, original_name, storage_dir)
+        asset = db.get(MediaAsset, media_sha256)
+        if asset is None:
+            raise RuntimeError("Stored media asset was not available after registration")
+        path = storage_dir / asset.stored_filename
+
+        row = ApiJob(
+            id=job_id,
+            owner_id=user.id,
+            media_sha256=media_sha256,
+            filename=original_name[:255],
+            media_kind=kind,
+            status="queued",
+        )
+        db.add(row)
+        db.commit()
+        try:
+            result = runtime.store.submit(user.id, str(path), job_id=job_id)
+        except Exception:
+            db.delete(row)
+            db.commit()
+            raise
+        row.status = result["status"]
+        row.cache_key = result["cache_key"]
+        deadline = time.monotonic() + JOB_RESULT_WAIT_S
+        job_status = runtime.store.status(job_id)
+        while (
+            job_status["status"] in {"queued", "waiting", "processing", "retrying"}
+            and time.monotonic() < deadline
+        ):
+            time.sleep(min(JOB_RESULT_POLL_S, max(0, deadline - time.monotonic())))
+            job_status = runtime.store.status(job_id)
+
+        row.status = job_status["status"]
+        row.result = job_status.get("result")
+        db.commit()
+        if job_status["status"] == "done":
+            response.status_code = status.HTTP_200_OK
+        elif job_status["status"] in {"failed", "dead"}:
+            response.status_code = status.HTTP_502_BAD_GATEWAY
+        return JobResponse(
+            job_id=job_id,
+            status=job_status["status"],
+            cached=job_status.get("cached", result["cached"]),
+            result=row.result,
+            error=job_status.get("error"),
+        )
+    except MediaError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+    except HTTPException:
+        db.rollback()
+        raise
+    finally:
+        file.file.close()
+        if staged_path.exists():
+            staged_path.unlink()
+
+
+def _require_reviewer(user: User) -> None:
+    if user.role not in {"manager", "admin"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Manager or admin role required")
+
+
+def _approval_jobs(status_value: Literal["pending", "approved", "rejected"], *, actor, db, runtime,
+                   limit: int, offset: int) -> JobPage:
+    _require_reviewer(actor)
+    query = select(ApiJob).where(
+        ApiJob.status == "done",
+        ApiJob.approval_status == status_value,
+    )
+    rows = db.execute(
+        query.join(User, User.id == ApiJob.owner_id)
+        .add_columns(User.email)
+        .order_by(ApiJob.created_at.desc(), ApiJob.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    items = [
+        _job_view(row, runtime.store.status(row.id), submitter_email=email)
+        for row, email in rows
+    ]
+    db.commit()
+    return JobPage(items=items, limit=limit, offset=offset)
+
+
+@router.get("/jobs/review", response_model=JobPage)
+def list_jobs_for_review(
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    return _approval_jobs(
+        "pending", actor=actor, db=db, runtime=runtime, limit=limit, offset=offset
+    )
+
+
+@router.get("/jobs/approved", response_model=JobPage)
+def list_approved_jobs(
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    return _approval_jobs(
+        "approved", actor=actor, db=db, runtime=runtime, limit=limit, offset=offset
+    )
+
+
+@router.get("/jobs/rejected", response_model=JobPage)
+def list_rejected_jobs(
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    return _approval_jobs(
+        "rejected", actor=actor, db=db, runtime=runtime, limit=limit, offset=offset
+    )
+
+
+@router.patch("/jobs/{job_id}/approval", response_model=JobView)
+def review_job(
+    job_id: str,
+    decision: ApprovalDecision,
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+):
+    _require_reviewer(actor)
+    row = db.get(ApiJob, job_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    if row.status != "done":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A job can only be approved or rejected after Gemini processing is complete",
+        )
+    if row.approval_status != "pending":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Job has already been {row.approval_status}",
+        )
+    row.approval_status = decision.status
+    owner = db.get(User, row.owner_id)
+    view = _job_view(
+        row,
+        runtime.store.status(job_id),
+        submitter_email=owner.email if owner else None,
+    )
+    db.commit()
+    return view
+
+
+@router.get("/jobs/{job_id}/media")
+def get_job_media(
+    job_id: str,
+    request: Request,
+    user: CurrentUser,
+    db: DbSession,
+):
+    row = db.get(ApiJob, job_id)
+    if row is None or (
+        user.role not in {"manager", "admin"} and row.owner_id != user.id
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    suffix = Path(row.filename).suffix.lower()
+    media = ALLOWED.get(suffix)
+    if media is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Uploaded media not found")
+    media_path = resolve_media_path(
+        db, row.id, row.filename, request.app.state.api_settings.media_storage_dir
+    )
+    if not media_path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Uploaded media not found")
+    return FileResponse(media_path, media_type=media[1], filename=row.filename)
+
+
+@router.get("/jobs", response_model=JobPage)
+def list_jobs(
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+    kind: Literal["image", "video"] | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    if actor.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    query = select(ApiJob)
+    if kind is not None:
+        query = query.where(ApiJob.media_kind == kind)
+    rows = db.execute(
+        query.join(User, User.id == ApiJob.owner_id)
+        .add_columns(User.email)
+        .order_by(ApiJob.created_at.desc(), ApiJob.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    items = [
+        _job_view(row, runtime.store.status(row.id), submitter_email=email)
+        for row, email in rows
+    ]
+    db.commit()
+    return JobPage(items=items, limit=limit, offset=offset)
+
+
+@router.get("/jobs/{job_id}", response_model=JobView)
+def get_job(
+    job_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+):
+    query = select(ApiJob).where(ApiJob.id == job_id)
+    if user.role != "admin":
+        query = query.where(ApiJob.owner_id == user.id)
+    row = db.scalar(query)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    owner = db.get(User, row.owner_id) if user.role in {"manager", "admin"} else None
+    view = _job_view(
+        row,
+        runtime.store.status(job_id),
+        submitter_email=owner.email if owner else None,
+    )
+    db.commit()
+    return view
+
+
+@router.delete("/jobs/{job_id}", response_model=JobView)
+def cancel_job(
+    job_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+):
+    query = select(ApiJob).where(ApiJob.id == job_id)
+    if user.role != "admin":
+        query = query.where(ApiJob.owner_id == user.id)
+    row = db.scalar(query)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    if not runtime.store.cancel(job_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Job is already running or cannot be cancelled",
+        )
+    view = _job_view(row, runtime.store.status(job_id))
+    db.commit()
+    return view
+
+
+@router.get("/stats", response_model=StatsResponse)
+def stats(
+    user: CurrentUser,
+    runtime: QueueRuntime,
+):
+    if user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    return StatsResponse(**runtime.queue.depths(), gemini_calls_today=runtime.limiter.used_today())
