@@ -96,6 +96,17 @@ def test_login_and_manager_user_creation(api_client):
     )
     assert created.status_code == 201, created.text
     assert created.json()["role"] == "user"
+    created_manager = client.post(
+        "/api/v1/users",
+        headers=manager_headers,
+        json={
+            "email": "new-manager@example.com",
+            "password": "a-very-long-test-password",
+            "role": "manager",
+        },
+    )
+    assert created_manager.status_code == 201
+    assert created_manager.json()["role"] == "manager"
     assert (
         client.post(
             "/api/v1/users",
@@ -546,3 +557,129 @@ def test_health_and_stats(api_client):
     assert client.get("/health/live").json() == {"status": "alive"}
     assert client.get("/health/ready").json() == {"status": "ready"}
     assert client.get("/api/v1/stats", headers=admin_headers).status_code == 200
+
+
+def test_admin_user_crud_and_super_admin_protection(api_client):
+    client, _ = api_client
+    _, admin = create_account(client, "ordinary-admin@example.com", role="admin")
+    super_id, super_admin = create_account(
+        client,
+        "abdullahtauseef988@gmail.com",
+        role="super_admin",
+    )
+    admin_headers = {"Authorization": f"Bearer {admin}"}
+    super_headers = {"Authorization": f"Bearer {super_admin}"}
+
+    created = client.post(
+        "/api/v1/users",
+        headers=admin_headers,
+        json={
+            "email": "managed-account@example.com",
+            "password": "a-very-long-test-password",
+            "role": "manager",
+        },
+    )
+    assert created.status_code == 201
+    user_id = created.json()["id"]
+    assert client.get(f"/api/v1/users/{user_id}", headers=admin_headers).status_code == 200
+
+    updated = client.patch(
+        f"/api/v1/users/{user_id}",
+        headers=admin_headers,
+        json={"email": "renamed-account@example.com", "role": "user"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["email"] == "renamed-account@example.com"
+    assert updated.json()["role"] == "user"
+
+    assert client.delete(f"/api/v1/users/{user_id}", headers=admin_headers).status_code == 204
+    assert client.get(f"/api/v1/users/{user_id}", headers=admin_headers).status_code == 404
+
+    super_user = client.get(f"/api/v1/users/{super_id}", headers=admin_headers)
+    assert super_user.status_code == 200
+    assert super_user.json()["role"] == "super_admin"
+    assert (
+        client.patch(
+            f"/api/v1/users/{super_id}",
+            headers=admin_headers,
+            json={"email": "changed@example.com"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            f"/api/v1/users/{super_id}/role",
+            headers=admin_headers,
+            json={"role": "user"},
+        ).status_code
+        == 403
+    )
+    assert client.delete(f"/api/v1/users/{super_id}", headers=admin_headers).status_code == 403
+    assert (
+        client.post(
+            "/api/v1/users",
+            headers=admin_headers,
+            json={
+                "email": "abdullahtauseef988@gmail.com",
+                "password": "a-very-long-test-password",
+                "role": "admin",
+            },
+        ).status_code
+        == 409
+    )
+    assert client.get("/api/v1/users", headers=super_headers).status_code == 200
+
+
+def test_admin_delete_cancels_user_queued_jobs(api_client):
+    client, runtime = api_client
+    _, admin = create_account(client, "delete-admin@example.com", role="admin")
+    user_id, user = create_account(client, "delete-user@example.com")
+    uploaded = client.post(
+        "/api/v1/jobs",
+        headers={"Authorization": f"Bearer {user}"},
+        files={"file": ("queued.png", sample_image(), "image/png")},
+    )
+    assert uploaded.status_code == 202
+    job_id = uploaded.json()["job_id"]
+    assert runtime.queue.depths()["ready"] == 1
+
+    admin_headers = {"Authorization": f"Bearer {admin}"}
+    deleted = client.delete(f"/api/v1/users/{user_id}", headers=admin_headers)
+    assert deleted.status_code == 204
+    assert runtime.queue.depths()["ready"] == 0
+    assert client.get(f"/api/v1/jobs/{job_id}", headers=admin_headers).status_code == 404
+
+
+def test_admin_password_reset_revokes_existing_tokens(api_client):
+    client, _ = api_client
+    user_id, old_token = create_account(client, "reset-user@example.com")
+    _, admin = create_account(client, "reset-admin@example.com", role="admin")
+    admin_headers = {"Authorization": f"Bearer {admin}"}
+
+    reset = client.patch(
+        f"/api/v1/users/{user_id}",
+        headers=admin_headers,
+        json={"password": "a-new-long-test-password"},
+    )
+    assert reset.status_code == 200
+    assert (
+        client.get(
+            "/api/v1/jobs",
+            headers={"Authorization": f"Bearer {old_token}"},
+        ).status_code
+        == 401
+    )
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "reset-user@example.com", "password": "a-new-long-test-password"},
+    )
+    assert login.status_code == 200
+    new_token = login.json()["access_token"]
+    assert (
+        client.get(
+            "/api/v1/jobs",
+            headers={"Authorization": f"Bearer {new_token}"},
+        ).status_code
+        == 403
+    )

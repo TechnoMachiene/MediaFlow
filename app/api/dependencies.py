@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.api.database import User
-from app.api.security import decode_access_token
+from app.api.security import decode_versioned_access_token
 from app.wiring import Runtime
 
 bearer = HTTPBearer(auto_error=False)
@@ -34,12 +34,12 @@ def current_user(
             "Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user_id = decode_access_token(
+    claims = decode_versioned_access_token(
         credentials.credentials,
         request.app.state.api_settings.jwt_secret,
     )
-    user = db.get(User, user_id) if user_id else None
-    if user is None:
+    user = db.get(User, claims[0]) if claims else None
+    if user is None or user.token_version != claims[1]:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "Invalid or expired token",

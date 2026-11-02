@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
-Role = Literal["user", "manager", "admin"]
+Role = Literal["user", "manager", "admin", "super_admin"]
+AssignableRole = Literal["user", "manager", "admin"]
 
 
 class Credentials(BaseModel):
@@ -25,7 +26,7 @@ class TokenResponse(BaseModel):
 
 
 class UserCreate(Credentials):
-    role: Role = "user"
+    role: AssignableRole = "user"
 
 
 class UserView(BaseModel):
@@ -42,7 +43,24 @@ class UserPage(BaseModel):
 
 
 class RoleUpdate(BaseModel):
-    role: Role
+    role: AssignableRole
+
+
+class UserUpdate(BaseModel):
+    email: EmailStr | None = None
+    password: str | None = Field(default=None, min_length=12, max_length=128)
+    role: AssignableRole | None = None
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        return value.strip().lower() if value is not None else None
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if self.email is None and self.password is None and self.role is None:
+            raise ValueError("At least one non-null field is required")
+        return self
 
 
 class ApprovalDecision(BaseModel):

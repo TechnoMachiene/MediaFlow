@@ -17,12 +17,13 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.database import ApiJob, MediaAsset, User
 from app.api.dependencies import CurrentUser, DbSession, QueueRuntime
 from app.api.media_storage import resolve_media_path, store_media_asset
+from app.api.roles import SUPER_ADMIN_EMAIL, is_admin, is_reviewer, is_super_admin
 from app.api.schemas import (
     ApprovalDecision,
     Credentials,
@@ -34,9 +35,10 @@ from app.api.schemas import (
     TokenResponse,
     UserCreate,
     UserPage,
+    UserUpdate,
     UserView,
 )
-from app.api.security import create_access_token, hash_password, verify_password
+from app.api.security import create_versioned_access_token, hash_password, verify_password
 from app.errors import MediaError
 from app.media import ALLOWED, inspect_media
 
@@ -45,10 +47,15 @@ JOB_RESULT_WAIT_S = 5 * 60
 JOB_RESULT_POLL_S = 0.25
 
 
-def _token(request: Request, user_id: str) -> TokenResponse:
+def _token(request: Request, user: User) -> TokenResponse:
     cfg = request.app.state.api_settings
     return TokenResponse(
-        access_token=create_access_token(user_id, cfg.jwt_secret, cfg.token_ttl_minutes),
+        access_token=create_versioned_access_token(
+            user.id,
+            cfg.jwt_secret,
+            cfg.token_ttl_minutes,
+            token_version=user.token_version,
+        ),
         expires_in=cfg.token_ttl_minutes * 60,
     )
 
@@ -59,10 +66,15 @@ def create_user(
     actor: CurrentUser,
     db: DbSession,
 ):
-    if actor.role not in {"manager", "admin"}:
+    if not is_reviewer(actor):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only managers and admins can create users")
-    if actor.role == "manager" and payload.role != "user":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Managers can only create user accounts")
+    if actor.role == "manager" and payload.role not in {"user", "manager"}:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Managers can only create user and manager accounts",
+        )
+    if str(payload.email).lower() == SUPER_ADMIN_EMAIL:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The super-admin account is reserved")
     user = User(
         email=str(payload.email),
         password_hash=hash_password(payload.password),
@@ -88,7 +100,7 @@ def list_users(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    if actor.role != "admin":
+    if not is_admin(actor):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     rows = db.scalars(
         select(User).order_by(User.created_at.desc(), User.id).limit(limit).offset(offset)
@@ -103,6 +115,24 @@ def list_users(
     )
 
 
+@router.get("/users/{user_id}", response_model=UserView)
+def get_user(user_id: str, actor: CurrentUser, db: DbSession):
+    if not is_admin(actor):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return UserView(id=user.id, email=user.email, role=user.role, created_at=user.created_at)
+
+
+def _protect_super_admin(target: User) -> None:
+    if is_super_admin(target):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "The super-admin account cannot be modified or deleted through the API",
+        )
+
+
 @router.patch("/users/{user_id}/role", response_model=UserView)
 def update_user_role(
     user_id: str,
@@ -110,19 +140,96 @@ def update_user_role(
     actor: CurrentUser,
     db: DbSession,
 ):
-    if actor.role != "admin":
+    if not is_admin(actor):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    if user.role == "admin" and payload.role != "admin":
-        admin_count = db.scalar(select(func.count()).select_from(User).where(User.role == "admin"))
+    _protect_super_admin(user)
+    if is_admin(user) and payload.role != "admin":
+        admin_count = db.scalar(
+            select(func.count()).select_from(User).where(User.role.in_(("admin", "super_admin")))
+        )
         if admin_count <= 1:
             raise HTTPException(status.HTTP_409_CONFLICT, "Cannot demote the last admin")
     user.role = payload.role
     db.commit()
     db.refresh(user)
     return UserView(id=user.id, email=user.email, role=user.role, created_at=user.created_at)
+
+
+@router.patch("/users/{user_id}", response_model=UserView)
+def update_user(user_id: str, payload: UserUpdate, actor: CurrentUser, db: DbSession):
+    if not is_admin(actor):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    _protect_super_admin(user)
+
+    if payload.email is not None:
+        if str(payload.email).lower() == SUPER_ADMIN_EMAIL:
+            raise HTTPException(status.HTTP_409_CONFLICT, "The super-admin email is reserved")
+        user.email = str(payload.email).lower()
+    if payload.password is not None:
+        user.password_hash = hash_password(payload.password)
+        user.token_version += 1
+    if payload.role is not None:
+        if is_admin(user) and payload.role != "admin":
+            admin_count = db.scalar(
+                select(func.count())
+                .select_from(User)
+                .where(User.role.in_(("admin", "super_admin")))
+            )
+            if admin_count <= 1:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Cannot demote the last admin")
+        user.role = payload.role
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "An account with that email already exists",
+        ) from None
+    db.refresh(user)
+    return UserView(id=user.id, email=user.email, role=user.role, created_at=user.created_at)
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: str,
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+):
+    if not is_admin(actor):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    _protect_super_admin(user)
+
+    jobs = db.scalars(select(ApiJob).where(ApiJob.owner_id == user_id)).all()
+    for job in jobs:
+        job_status = runtime.store.status(job.id)["status"]
+        if job_status in {"queued", "waiting", "retrying"}:
+            if not runtime.store.cancel(job.id):
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Cannot delete account while one of its jobs is being processed",
+                )
+        elif job_status == "processing":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Cannot delete account while one of its jobs is being processed",
+            )
+
+    db.execute(delete(ApiJob).where(ApiJob.owner_id == user_id))
+    db.delete(user)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/auth/login", response_model=TokenResponse)
@@ -134,7 +241,7 @@ def login(payload: Credentials, request: Request, db: DbSession):
             "Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return _token(request, user.id)
+    return _token(request, user)
 
 
 def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) -> JobView:
@@ -287,7 +394,7 @@ def upload_job(
 
 
 def _require_reviewer(user: User) -> None:
-    if user.role not in {"manager", "admin"}:
+    if not is_reviewer(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Manager or admin role required")
 
 
@@ -394,7 +501,7 @@ def get_job_media(
 ):
     row = db.get(ApiJob, job_id)
     if row is None or (
-        user.role not in {"manager", "admin"} and row.owner_id != user.id
+        not is_reviewer(user) and row.owner_id != user.id
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
     suffix = Path(row.filename).suffix.lower()
@@ -418,7 +525,7 @@ def list_jobs(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    if actor.role != "admin":
+    if not is_admin(actor):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     query = select(ApiJob)
     if kind is not None:
@@ -446,12 +553,12 @@ def get_job(
     runtime: QueueRuntime,
 ):
     query = select(ApiJob).where(ApiJob.id == job_id)
-    if user.role != "admin":
+    if not is_admin(user):
         query = query.where(ApiJob.owner_id == user.id)
     row = db.scalar(query)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
-    owner = db.get(User, row.owner_id) if user.role in {"manager", "admin"} else None
+    owner = db.get(User, row.owner_id) if is_reviewer(user) else None
     view = _job_view(
         row,
         runtime.store.status(job_id),
@@ -469,7 +576,7 @@ def cancel_job(
     runtime: QueueRuntime,
 ):
     query = select(ApiJob).where(ApiJob.id == job_id)
-    if user.role != "admin":
+    if not is_admin(user):
         query = query.where(ApiJob.owner_id == user.id)
     row = db.scalar(query)
     if row is None:
@@ -489,6 +596,6 @@ def stats(
     user: CurrentUser,
     runtime: QueueRuntime,
 ):
-    if user.role != "admin":
+    if not is_admin(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     return StatsResponse(**runtime.queue.depths(), gemini_calls_today=runtime.limiter.used_today())

@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.api.config import ApiSettings
 from app.api.database import User, create_database
+from app.api.roles import SUPER_ADMIN_EMAIL
 from app.api.security import hash_password
 
 
@@ -34,15 +35,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with sessions.begin() as db:
             user = db.scalar(select(User).where(User.email == email))
+            role = "super_admin" if email == SUPER_ADMIN_EMAIL else "admin"
             if user is None:
-                user = User(email=email, password_hash=hash_password(password), role="admin")
+                user = User(email=email, password_hash=hash_password(password), role=role)
                 db.add(user)
                 action = "Created"
             else:
                 user.password_hash = hash_password(password)
-                user.role = "admin"
+                user.role = role
+                user.token_version += 1
                 action = "Promoted and reset password for"
-        print(f"{action} admin account: {email}")
+        print(f"{action} {role.replace('_', ' ')} account: {email}")
         return 0
     finally:
         engine.dispose()

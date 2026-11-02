@@ -102,22 +102,27 @@ Install ffmpeg on the worker machine for uploads larger than `MAX_VIDEO_MB`:
 when ffmpeg is unavailable. Successful `POST /jobs` responses include the generated prompt output
 at `result.text`; failed jobs include an `error` and return HTTP 502.
 Apply schema upgrades, including the manager approval-status column, with `alembic upgrade head`
-before restarting the API.
+before restarting the API. This also applies token-version support; existing JWTs without the
+version claim must be replaced by logging in again.
 
 Interactive API documentation: `http://127.0.0.1:8000/docs`
 
-Create the first administrator after applying migrations. The password is prompted securely, not
+Create the designated super administrator after applying migrations. The password is prompted securely, not
 passed in the shell command:
 ```bash
 python -m app.api.admin abdullahtauseef988@gmail.com
 ```
-Choose a new strong password; do not reuse a password pasted into chat. This command creates the
-admin or promotes/resets the account if that email already exists.
+Choose a new strong password. This command creates the super admin or promotes/resets the account
+if that email already exists; resetting a password revokes that account's existing JWTs. The
+designated account cannot be changed or deleted through the API.
 
 Endpoints under `/api/v1`:
 - `POST /auth/login` — JWT access token
-- `POST /users` — managers can create regular users; admins can create any role
-- `GET /users`, `PATCH /users/{user_id}/role` — admin only
+- `POST /users` — managers can create users/managers; admins and the super admin can create
+  users, managers, and admins
+- `GET /users`, `GET /users/{user_id}`, `PATCH /users/{user_id}`,
+  `PATCH /users/{user_id}/role`, `DELETE /users/{user_id}` — admin/super-admin only;
+  admins cannot modify or delete the protected super-admin account
 - `POST /jobs` — authenticated multipart upload (`file`); users, managers, and admins. Waits up to
   five minutes for Gemini and includes `result` when complete; returns `202` with a null result if
   still queued/processing when the wait expires. Keep the worker running.
