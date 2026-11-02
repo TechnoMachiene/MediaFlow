@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -110,3 +111,47 @@ class StatsResponse(BaseModel):
     deferred: int
     dead: int
     gemini_calls_today: int
+
+
+class SchedulePostRequest(BaseModel):
+    scheduled_at: datetime
+    timezone: str = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_schedule(self):
+        if self.scheduled_at.tzinfo is None or self.scheduled_at.utcoffset() is None:
+            raise ValueError("scheduled_at must include a UTC offset")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("timezone must be a valid IANA timezone") from None
+        return self
+
+
+class ScheduledPostView(BaseModel):
+    id: str
+    job_id: str
+    original_filename: str
+    media_kind: str
+    status: str
+    scheduled_at: datetime
+    timezone: str
+    local_date: date
+    content: str
+    created_at: datetime
+
+
+class ScheduledPostPage(BaseModel):
+    items: list[ScheduledPostView]
+    limit: int
+    offset: int
+
+
+class CalendarDay(BaseModel):
+    date: date
+    posts: list[ScheduledPostView]
+
+
+class CalendarResponse(BaseModel):
+    timezone: str
+    days: list[CalendarDay]

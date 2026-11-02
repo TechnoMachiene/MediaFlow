@@ -7,7 +7,12 @@ from fastapi import FastAPI, HTTPException, Request, status
 from sqlalchemy import select, text
 
 from app.api.config import ApiSettings
-from app.api.database import ApiJob, User, create_database
+from app.api.database import (
+    ApiJob,
+    ScheduledPost,
+    User,
+    create_database,
+)
 from app.api.routes import router
 from app.config import Settings
 from app.wiring import Runtime, build_runtime
@@ -46,7 +51,9 @@ def create_app(
 
     application = FastAPI(
         title="Media Queue API",
-        description="Authenticated image/video analysis jobs backed by Redis and Gemini.",
+        description=(
+            "Authenticated media analysis, review, and post scheduling APIs."
+        ),
         version="1.0.0",
         lifespan=lifespan,
     )
@@ -63,6 +70,7 @@ def create_app(
                 session.execute(text("SELECT 1"))
                 session.execute(select(User.id).limit(0))
                 session.execute(select(ApiJob.id).limit(0))
+                session.execute(select(ScheduledPost.id).limit(0))
             request.app.state.runtime.r.ping()
         except Exception:
             raise HTTPException(

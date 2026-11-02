@@ -421,6 +421,10 @@ def test_manager_review_lists_and_approval_actions(api_client, make_image):
         item["job_id"]
         for item in client.get("/api/v1/jobs/rejected", headers=manager_headers).json()["items"]
     }
+    assert rejected_id not in {
+        item["job_id"]
+        for item in client.get("/api/v1/jobs/review", headers=manager_headers).json()["items"]
+    }
     assert client.get("/api/v1/jobs/review", headers=user_headers).status_code == 403
     assert (
         client.patch(

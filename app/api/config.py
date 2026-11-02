@@ -34,4 +34,9 @@ class ApiSettings:
             raise ConfigError("ACCESS_TOKEN_TTL_MINUTES must be between 1 and 1440.")
 
         storage_dir = Path(os.environ.get("MEDIA_STORAGE_DIR", "uploads")).expanduser()
-        return cls(database_url, jwt_secret, token_ttl_minutes, storage_dir.resolve())
+        return cls(
+            database_url=database_url,
+            jwt_secret=jwt_secret,
+            token_ttl_minutes=token_ttl_minutes,
+            media_storage_dir=storage_dir.resolve(),
+        )

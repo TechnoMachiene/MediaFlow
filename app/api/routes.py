@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as datetime_time
 from pathlib import Path
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import (
     APIRouter,
@@ -19,18 +22,29 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
-from app.api.database import ApiJob, MediaAsset, User
+from app.api.database import (
+    ApiJob,
+    MediaAsset,
+    ScheduledPost,
+    User,
+)
 from app.api.dependencies import CurrentUser, DbSession, QueueRuntime
 from app.api.media_storage import resolve_media_path, store_media_asset
 from app.api.roles import SUPER_ADMIN_EMAIL, is_admin, is_reviewer, is_super_admin
 from app.api.schemas import (
     ApprovalDecision,
+    CalendarDay,
+    CalendarResponse,
     Credentials,
     JobPage,
     JobResponse,
     JobView,
     RoleUpdate,
+    ScheduledPostPage,
+    ScheduledPostView,
+    SchedulePostRequest,
     StatsResponse,
     TokenResponse,
     UserCreate,
@@ -459,6 +473,26 @@ def list_rejected_jobs(
     )
 
 
+@router.get("/jobs/mine", response_model=JobPage)
+def list_my_jobs(
+    actor: CurrentUser,
+    db: DbSession,
+    runtime: QueueRuntime,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    rows = db.scalars(
+        select(ApiJob)
+        .where(ApiJob.owner_id == actor.id)
+        .order_by(ApiJob.created_at.desc(), ApiJob.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    items = [_job_view(row, runtime.store.status(row.id)) for row in rows]
+    db.commit()
+    return JobPage(items=items, limit=limit, offset=offset)
+
+
 @router.patch("/jobs/{job_id}/approval", response_model=JobView)
 def review_job(
     job_id: str,
@@ -599,3 +633,217 @@ def stats(
     if not is_admin(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     return StatsResponse(**runtime.queue.depths(), gemini_calls_today=runtime.limiter.used_today())
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _scheduled_post_view(
+    db: Session, post: ScheduledPost, timezone_name: str
+) -> ScheduledPostView:
+    job = db.get(ApiJob, post.job_id)
+    if job is None or job.result is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The scheduled job no longer has a completed Gemini result",
+        )
+    scheduled_at = _as_utc(post.scheduled_at)
+    return ScheduledPostView(
+        id=post.id,
+        job_id=post.job_id,
+        original_filename=job.filename,
+        media_kind=job.media_kind,
+        status=post.status,
+        scheduled_at=scheduled_at,
+        timezone=post.timezone,
+        local_date=scheduled_at.astimezone(ZoneInfo(timezone_name)).date(),
+        content=str(job.result["text"]),
+        created_at=_as_utc(post.created_at),
+    )
+
+
+def _calendar_bounds(start: date, end: date, timezone_name: str) -> tuple[datetime, datetime]:
+    if end < start:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "end must be on or after start")
+    if (end - start).days > 92:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Calendar range cannot exceed 93 days",
+        )
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid IANA timezone"
+        ) from None
+    beginning = datetime.combine(start, datetime_time.min, tzinfo=zone).astimezone(timezone.utc)
+    after_end = datetime.combine(end + timedelta(days=1), datetime_time.min, tzinfo=zone)
+    return beginning, after_end.astimezone(timezone.utc)
+
+
+def _list_scheduled_posts(
+    db: Session,
+    user: User,
+    start: date,
+    end: date,
+    timezone_name: str,
+    *,
+    limit: int,
+    offset: int = 0,
+) -> list[ScheduledPostView]:
+    beginning, after_end = _calendar_bounds(start, end, timezone_name)
+    query = select(ScheduledPost).where(
+        ScheduledPost.scheduled_at >= beginning,
+        ScheduledPost.scheduled_at < after_end,
+    )
+    if not is_admin(user):
+        query = query.where(ScheduledPost.owner_id == user.id)
+    posts = db.scalars(
+        query.order_by(ScheduledPost.scheduled_at, ScheduledPost.id)
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return [_scheduled_post_view(db, post, timezone_name) for post in posts]
+
+
+@router.post(
+    "/jobs/{job_id}/schedule",
+    response_model=ScheduledPostView,
+    status_code=status.HTTP_201_CREATED,
+)
+def schedule_job(
+    job_id: str,
+    payload: SchedulePostRequest,
+    actor: CurrentUser,
+    db: DbSession,
+):
+    job_query = select(ApiJob).where(ApiJob.id == job_id)
+    job_query = job_query.where(ApiJob.owner_id == actor.id)
+    job = db.scalar(job_query)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    if job.status != "done" or job.result is None or job.approval_status != "approved":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Only completed, manager-approved jobs can be scheduled",
+        )
+    if payload.scheduled_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "scheduled_at must be in the future"
+        )
+    if db.scalar(select(ScheduledPost.id).where(ScheduledPost.job_id == job.id)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This job already has a scheduled post")
+
+    post = ScheduledPost(
+        job_id=job.id,
+        owner_id=job.owner_id,
+        scheduled_at=payload.scheduled_at.astimezone(timezone.utc),
+        timezone=payload.timezone,
+    )
+    db.add(post)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This job already has a scheduled post"
+        ) from None
+    return _scheduled_post_view(db, post, payload.timezone)
+
+
+@router.get("/scheduled-posts", response_model=ScheduledPostPage)
+def list_scheduled_posts(
+    actor: CurrentUser,
+    db: DbSession,
+    start: date,
+    end: date,
+    timezone_name: str = Query(alias="timezone"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    return ScheduledPostPage(
+        items=_list_scheduled_posts(
+            db, actor, start, end, timezone_name, limit=limit, offset=offset
+        ),
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/calendar", response_model=CalendarResponse)
+def get_calendar(
+    actor: CurrentUser,
+    db: DbSession,
+    start: date,
+    end: date,
+    timezone_name: str = Query(alias="timezone"),
+):
+    posts = _list_scheduled_posts(
+        db, actor, start, end, timezone_name, limit=1001
+    )
+    if len(posts) > 1000:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Calendar range contains more than 1000 posts; use the paginated scheduled-posts API",
+        )
+    grouped = {
+        start + timedelta(days=index): []
+        for index in range((end - start).days + 1)
+    }
+    for post in posts:
+        grouped[post.local_date].append(post)
+    return CalendarResponse(
+        timezone=timezone_name,
+        days=[CalendarDay(date=day, posts=items) for day, items in grouped.items()],
+    )
+
+
+@router.get("/scheduled-posts/{post_id}", response_model=ScheduledPostView)
+def get_scheduled_post(post_id: str, actor: CurrentUser, db: DbSession):
+    query = select(ScheduledPost).where(ScheduledPost.id == post_id)
+    if not is_admin(actor):
+        query = query.where(ScheduledPost.owner_id == actor.id)
+    post = db.scalar(query)
+    if post is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Scheduled post not found")
+    return _scheduled_post_view(db, post, post.timezone)
+
+
+@router.patch("/scheduled-posts/{post_id}", response_model=ScheduledPostView)
+def reschedule_post(
+    post_id: str,
+    payload: SchedulePostRequest,
+    actor: CurrentUser,
+    db: DbSession,
+):
+    query = select(ScheduledPost).where(ScheduledPost.id == post_id)
+    if not is_admin(actor):
+        query = query.where(ScheduledPost.owner_id == actor.id)
+    post = db.scalar(query)
+    if post is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Scheduled post not found")
+    if payload.scheduled_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "scheduled_at must be in the future"
+        )
+    post.scheduled_at = payload.scheduled_at.astimezone(timezone.utc)
+    post.timezone = payload.timezone
+    post.status = "scheduled"
+    db.commit()
+    return _scheduled_post_view(db, post, payload.timezone)
+
+
+@router.delete("/scheduled-posts/{post_id}", response_model=ScheduledPostView)
+def cancel_scheduled_post(post_id: str, actor: CurrentUser, db: DbSession):
+    query = select(ScheduledPost).where(ScheduledPost.id == post_id)
+    if not is_admin(actor):
+        query = query.where(ScheduledPost.owner_id == actor.id)
+    post = db.scalar(query)
+    if post is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Scheduled post not found")
+    post.status = "cancelled"
+    db.commit()
+    return _scheduled_post_view(db, post, post.timezone)

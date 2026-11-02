@@ -128,6 +128,8 @@ Endpoints under `/api/v1`:
   still queued/processing when the wait expires. Keep the worker running.
 - `GET /jobs/{job_id}`, `DELETE /jobs/{job_id}` — users/managers access only their own jobs;
   admins can access any job
+- `GET /jobs/mine` — authenticated users list their own jobs with processing and approval statuses;
+  supports `limit` and `offset`
 - `GET /jobs/review`, `GET /jobs/approved`, `GET /jobs/rejected` — managers/admins can list
   completed jobs by approval status; pending review items include Gemini output and a protected
   `media_url` and the submitter's `submitter_email`
@@ -136,6 +138,41 @@ Endpoints under `/api/v1`:
   it (manager/admin review listings include the URL)
 - `GET /jobs`, `GET /stats` — admin only
 - `GET /health/live`, `GET /health/ready` — process liveness and PostgreSQL/Redis readiness
+- `POST /jobs/{job_id}/schedule` — the job owner schedules a completed, approved job for a future
+  date and time; this records it for the calendar and does not publish it
+- `GET /scheduled-posts` and `GET /calendar` — scheduled post and date-grouped calendar views;
+  pass `start`, `end`, and an IANA `timezone`
+- `GET/PATCH/DELETE /scheduled-posts/{post_id}` — inspect, reschedule, or cancel the post
+
+### Post scheduling and calendar
+
+Scheduling is currently calendar-only: it records a job's date and time, timezone, media name, and
+Gemini result so the owner can view, reschedule, or cancel it. It does not connect to social
+accounts, run a publishing worker, or automatically send/publish anything when the scheduled time
+arrives. Scheduling requires a completed job approved by a manager. The timestamp must include a
+UTC offset and the timezone must be a valid IANA name; the database stores the instant in UTC and
+calendar responses convert it to the requested timezone. Calendar queries support up to 93 days
+and return the individual scheduled posts under each date.
+
+The latest migration removes any previously saved platform accounts and their tokens, OAuth state,
+and publication records. Existing scheduled calendar entries are retained.
+
+Example schedule request:
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/jobs/$JOB_ID/schedule" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"scheduled_at":"2030-01-15T10:00:00+05:00","timezone":"Asia/Karachi"}'
+```
+
+List a month in the calendar:
+```bash
+curl --get "http://127.0.0.1:8000/api/v1/calendar" \
+  -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode "start=2030-01-01" \
+  --data-urlencode "end=2030-01-31" \
+  --data-urlencode "timezone=Asia/Karachi"
+```
 
 Example request flow:
 ```bash
