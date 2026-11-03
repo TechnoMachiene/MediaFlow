@@ -1,226 +1,364 @@
-# Media queue: Redis -> Gemini
+# MediaFlow — AI Media Analysis & Content Calendar
 
-Users submit images/videos through a CLI or FastAPI. Jobs wait in Redis. Workers send them to Gemini at a safe pace.
-Identical uploads (same bytes + fixed system prompt + model) cost ONE Gemini call.
-Real Gemini only. The app has no demo or stand-in mode.
+MediaFlow is a self-hosted backend for uploading images and videos, generating social-media
+content drafts with Google Gemini, reviewing jobs with role-based accounts, and planning approved
+posts on a timezone-aware calendar.
 
+> **Current scope:** This project analyzes media and creates content suggestions. It does not
+> connect to Instagram, Facebook, or TikTok, and it does not automatically publish posts. The
+> calendar is for planning and tracking only.
+
+## What it does
+
+- Accepts images and videos through a command-line interface or an authenticated FastAPI endpoint.
+- Validates media type, file contents, and configured size limits.
+- Uses Gemini to analyze the media and draft platform-tailored captions and content suggestions.
+- Processes work asynchronously through a Redis queue, with status checks and retries.
+- Deduplicates identical media/model/prompt jobs to avoid repeated Gemini calls where possible.
+- Stores user/job records and durable completed results in PostgreSQL.
+- Supports users, managers, admins, and a protected super-admin account.
+- Lets managers/admins review completed work and approve or reject it.
+- Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
+- Stores schedule instants in UTC and displays them in the requested IANA timezone.
+- Includes automated unit and integration tests that use synthetic media and a scripted Gemini
+  client; live Gemini tests are separate.
+
+## What it does not do
+
+- It has no web frontend; use the API and its interactive docs at `/docs`.
+- It does not connect social accounts, send posts to platform APIs, or publish automatically when
+  a calendar date arrives.
+- It does not provide in-app notifications for review results or scheduled dates.
+- It does not run in a demo mode: real job processing requires valid Gemini credentials. Automated
+  tests use a test-only scripted client instead.
+
+## Workflow
+
+```text
+upload -> validate -> hash and deduplicate -> Redis queue -> worker -> Gemini
+                                                         -> persist result
+completed job -> manager review -> approved -> owner schedules -> calendar
 ```
-submit -> validate -> sha256 -> dedup? --yes--> reuse result / wait for in-flight job
-                                  | no
-                                  v
-                          Redis ready list -> worker -> limiter (RPM + daily cap + cooldown)
-                                                   -> Gemini -> result -> all waiting users
-```
 
-## Setup (Ubuntu 26.04 on WSL, Python 3.14, Redis 8)
+The Gemini system prompt is designed to inspect the supplied media and generate platform-specific
+content drafts, including captions and related suggestions. Drafts are returned as analysis
+results; they are not sent to social platforms.
+
+## Technology
+
+- Python 3.11 or newer
+- FastAPI and Uvicorn for the HTTP API
+- Redis for job queues, job status, caching, and shared rate limiting
+- PostgreSQL for accounts, job metadata, approval state, schedules, and durable results
+- SQLAlchemy and Alembic for database access and migrations
+- Google Gemini for media analysis and draft generation
+- Pillow for image inspection and resizing
+- FFmpeg for compressing larger videos
+- Pytest and Ruff for testing and linting
+
+## Quick setup on Ubuntu or WSL
+
+The repository includes a setup script that installs the system packages, creates a virtual
+environment, and runs the automated test gate:
+
 ```bash
-redis-cli ping                                   # PONG (Redis service already runs)
-cd ~/code && unzip /mnt/c/Users/hp/Downloads/media_queue.zip && cd media_queue
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt              # uv alternative: uv venv && uv pip install -r requirements-dev.txt
-export REDIS_URL=redis://localhost:6379/0
-make done                                        # lint + unit + integration + coverage
+bash quickstart.sh
 ```
-`make done` never calls Gemini and needs no API key. Tests replace Gemini with a scripted
-stand-in from `tests/helpers.py`. Tests use their own key prefix. Never FLUSHDB.
-Tested on: Python 3.14.4 + Redis 8.0.5, and Python 3.12 + Redis 7.0.15.
 
-## Configure real Gemini
-```bash
-cp -n .env.example .env          # -n: never overwrites your existing .env
-nano .env                        # fill GEMINI_API_KEY, GEMINI_MODEL, GEMINI_RPM, GEMINI_RPD
-grep -cE '^GEMINI_API_KEY=[^ ]' .env     # must print 1 (no space after =)
-make live                        # one tiny real call; expect: 1 passed + printed text
-```
-`.env` rules: no spaces around `=`, no quotes, comments on their own lines.
-Get model id and limits from your AI Studio page. Unset limits default to 5/min and 100/day.
-Free tier: throwaway media only. Real user or company data needs paid billing.
-
-## Run by hand (real calls)
-```bash
-python -m app.cli submit uploads/cat.png --user 1
-python -m app.cli submit uploads/cat.png --user 2   # waiting (deduped)
-python -m app.cli stats
-python -m app.cli worker --drain                 # one real Gemini call serves both users
-python -m app.cli status <job_id>
-```
-Long-running worker: `python -m app.cli worker` (Ctrl+C stops). Several workers share one limiter.
-Worker logs show Gemini HTTP lines. Normal.
-
-## FastAPI backend
-
-The API is a separate HTTP interface to the same Redis queue. PostgreSQL stores user accounts,
-the searchable job index, and a durable copy of completed Gemini output; Redis remains the live
-queue/result store. The worker writes each completed result to the corresponding PostgreSQL job
-row (including matching deduplicated uploads). Uploaded originals are written to
-`MEDIA_STORAGE_DIR`, which must be a persistent directory shared by the API and worker processes.
-New media files use their sanitized original filename; byte-identical uploads reuse the existing
-stored file. Different content with a colliding filename gets a short SHA-256 suffix, while each
-job retains its own `original_filename` in API responses and listings.
-Apply `alembic upgrade head` before deploying this storage change; the migration adds a
-content-addressed media-asset registry. Previously stored job-ID-named files are left in place for
-existing job references and are not automatically deleted.
-Apply the database migration before starting the API:
+Or install the dependencies and run the test suite manually:
 
 ```bash
-# Ubuntu: install/start PostgreSQL if quickstart.sh has not already done so.
-sudo apt-get install -y postgresql
+sudo apt-get update
+sudo apt-get install -y redis-server postgresql python3-venv python3-pip make ffmpeg
+sudo service redis-server start
 sudo service postgresql start
 
-# Create a local development database/user (choose your own password).
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+export REDIS_URL=redis://localhost:6379/0
+make done
+```
+
+`make done` runs linting, unit tests, integration tests, and the coverage check. It does not call
+Gemini. Integration tests need a reachable Redis service. Never run `FLUSHDB` against a database
+that contains data you need.
+
+## Configure Gemini
+
+Copy the example configuration without replacing an existing `.env`, then set your Gemini API key
+and model:
+
+```bash
+cp -n .env.example .env
+nano .env
+```
+
+Set at least:
+
+```dotenv
+GEMINI_API_KEY=your-key
+GEMINI_MODEL=your-model-id
+```
+
+Set `GEMINI_RPM` and `GEMINI_RPD` to the limits shown in your AI Studio project. If omitted, the
+application uses conservative defaults of 5 requests per minute and 100 requests per day. Keep
+`.env` private and never commit or share it.
+
+To make a small real Gemini request:
+
+```bash
+make live
+```
+
+This calls Gemini and may incur usage or charges. Use non-sensitive test media unless you have
+confirmed the privacy and billing terms for your account.
+
+## CLI usage
+
+The CLI can submit jobs, inspect status and queue statistics, and run a worker. These commands use
+real Gemini when processing a job:
+
+```bash
+# Submit an image to the queue
+python -m app.cli submit uploads/cat.png --user 1
+
+# Inspect queue and rate-limit statistics
+python -m app.cli stats
+
+# Process the current queue and exit when idle
+python -m app.cli worker --drain
+
+# Check a job
+python -m app.cli status JOB_ID
+
+# Run a persistent worker; Ctrl+C stops it
+python -m app.cli worker
+```
+
+Identical uploads may be reported as waiting for an existing job or may reuse its completed
+result. Multiple workers share the Redis-backed rate limiter.
+
+## FastAPI setup
+
+### 1. Configure PostgreSQL
+
+Start PostgreSQL and create a local development database and user. Choose your own password:
+
+```bash
+sudo service postgresql start
 sudo -u postgres psql
 ```
 
 In the `psql` prompt:
+
 ```sql
-CREATE USER media_queue WITH PASSWORD 'replace-with-a-local-password';
+CREATE USER media_queue WITH PASSWORD 'choose-a-local-password';
 CREATE DATABASE media_queue OWNER media_queue;
 \q
 ```
 
-Configure `.env` (never commit it). Set `DATABASE_URL` to use the password you chose and generate
-a JWT secret:
-```bash
-cp -n .env.example .env
-openssl rand -hex 32
-nano .env
+Set `DATABASE_URL` in `.env`, URL-encoding special characters in the password if needed:
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://media_queue:choose-a-local-password@localhost:5432/media_queue
+JWT_SECRET=replace-with-at-least-32-random-bytes
+MEDIA_STORAGE_DIR=uploads
 ```
 
-The API also needs the existing `GEMINI_API_KEY` and `GEMINI_MODEL` settings. Run migrations, then
-start the API and worker in separate terminals:
+Generate a JWT secret, for example:
+
+```bash
+openssl rand -hex 32
+```
+
+### 2. Migrate and create the administrator
+
 ```bash
 source .venv/bin/activate
 alembic upgrade head
-uvicorn app.api.main:app --reload
+python -m app.api.admin abdullahtauseef988@gmail.com
+```
 
-# Separate terminal, same project directory and .env:
+The admin command prompts for a password securely. The designated email is protected as the
+super-admin account. Running the command again for an existing account resets its password and
+revokes its existing tokens.
+
+### 3. Start the API and worker
+
+Run the API and Gemini worker in separate terminals from the project directory:
+
+```bash
+# Terminal 1
+source .venv/bin/activate
+uvicorn app.api.main:app --reload
+```
+
+```bash
+# Terminal 2
 source .venv/bin/activate
 python -m app.cli worker
 ```
-Install ffmpeg on the worker machine for uploads larger than `MAX_VIDEO_MB`:
-`sudo apt-get update && sudo apt-get install -y ffmpeg`. The worker logs a warning at startup
-when ffmpeg is unavailable. Successful `POST /jobs` responses include the generated prompt output
-at `result.text`; failed jobs include an `error` and return HTTP 502.
-Apply schema upgrades, including the manager approval-status column, with `alembic upgrade head`
-before restarting the API. This also applies token-version support; existing JWTs without the
-version claim must be replaced by logging in again.
 
-Interactive API documentation: `http://127.0.0.1:8000/docs`
+The API and worker must use the same Redis queue, PostgreSQL database, and persistent
+`MEDIA_STORAGE_DIR`. FFmpeg is needed on worker machines to compress videos that exceed the
+Gemini processing size limit. Uploaded originals are retained in media storage; set and enforce a
+retention policy appropriate for your deployment.
 
-Create the designated super administrator after applying migrations. The password is prompted securely, not
-passed in the shell command:
-```bash
-python -m app.api.admin abdullahtauseef988@gmail.com
-```
-Choose a new strong password. This command creates the super admin or promotes/resets the account
-if that email already exists; resetting a password revokes that account's existing JWTs. The
-designated account cannot be changed or deleted through the API.
+Interactive API documentation: <http://127.0.0.1:8000/docs>
 
-Endpoints under `/api/v1`:
-- `POST /auth/login` — JWT access token
-- `POST /users` — managers can create users/managers; admins and the super admin can create
-  users, managers, and admins
-- `GET /users`, `GET /users/{user_id}`, `PATCH /users/{user_id}`,
-  `PATCH /users/{user_id}/role`, `DELETE /users/{user_id}` — admin/super-admin only;
-  admins cannot modify or delete the protected super-admin account
-- `POST /jobs` — authenticated multipart upload (`file`); users, managers, and admins. Waits up to
-  five minutes for Gemini and includes `result` when complete; returns `202` with a null result if
-  still queued/processing when the wait expires. Keep the worker running.
-- `GET /jobs/{job_id}`, `DELETE /jobs/{job_id}` — users/managers access only their own jobs;
-  admins can access any job
-- `GET /jobs/mine` — authenticated users list their own jobs with processing and approval statuses;
-  supports `limit` and `offset`
-- `GET /jobs/review`, `GET /jobs/approved`, `GET /jobs/rejected` — managers/admins can list
-  completed jobs by approval status; pending review items include Gemini output and a protected
-  `media_url` and the submitter's `submitter_email`
-- `PATCH /jobs/{job_id}/approval` — managers/admins set a completed job to `approved` or `rejected`
-- `GET /jobs/{job_id}/media` — protected original upload; owners, managers, and admins can fetch
-  it (manager/admin review listings include the URL)
-- `GET /jobs`, `GET /stats` — admin only
-- `GET /health/live`, `GET /health/ready` — process liveness and PostgreSQL/Redis readiness
-- `POST /jobs/{job_id}/schedule` — the job owner schedules a completed, approved job for a future
-  date and time; this records it for the calendar and does not publish it
-- `GET /scheduled-posts` and `GET /calendar` — scheduled post and date-grouped calendar views;
-  pass `start`, `end`, and an IANA `timezone`
-- `GET/PATCH/DELETE /scheduled-posts/{post_id}` — inspect, reschedule, or cancel the post
+## API reference
 
-### Post scheduling and calendar
+All application endpoints below use the `/api/v1` prefix unless noted otherwise. Authenticated
+endpoints expect `Authorization: Bearer <access_token>`.
 
-Scheduling is currently calendar-only: it records a job's date and time, timezone, media name, and
-Gemini result so the owner can view, reschedule, or cancel it. It does not connect to social
-accounts, run a publishing worker, or automatically send/publish anything when the scheduled time
-arrives. Scheduling requires a completed job approved by a manager. The timestamp must include a
-UTC offset and the timezone must be a valid IANA name; the database stores the instant in UTC and
-calendar responses convert it to the requested timezone. Calendar queries support up to 93 days
-and return the individual scheduled posts under each date.
+### Authentication and account management
 
-The latest migration removes any previously saved platform accounts and their tokens, OAuth state,
-and publication records. Existing scheduled calendar entries are retained.
+| Method and path | Access | Purpose |
+|---|---|---|
+| `POST /auth/login` | Public | Log in and receive a bearer token. |
+| `POST /users` | Manager/admin | Create a user or manager; admins can also create admins. |
+| `GET /users`, `GET /users/{user_id}` | Admin | List users or get one user. |
+| `PATCH /users/{user_id}` | Admin | Update supported account fields. |
+| `PATCH /users/{user_id}/role` | Admin | Change a user's role. |
+| `DELETE /users/{user_id}` | Admin | Delete a user, subject to active-job safeguards. |
 
-Example schedule request:
-```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/jobs/$JOB_ID/schedule" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"scheduled_at":"2030-01-15T10:00:00+05:00","timezone":"Asia/Karachi"}'
-```
+Managers can create users and managers, but cannot create admins. Admins can manage accounts;
+the protected super-admin account cannot be modified or deleted through the API. Account creation
+is restricted to authorized managers/admins—there is no public registration endpoint.
 
-List a month in the calendar:
-```bash
-curl --get "http://127.0.0.1:8000/api/v1/calendar" \
-  -H "Authorization: Bearer $TOKEN" \
-  --data-urlencode "start=2030-01-01" \
-  --data-urlencode "end=2030-01-31" \
-  --data-urlencode "timezone=Asia/Karachi"
-```
+### Media jobs and review
 
-Example request flow:
-```bash
-TOKEN=$(curl -fsS http://127.0.0.1:8000/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"you@example.com","password":"your-existing-password"}' | python3 -c \
-  'import json,sys; print(json.load(sys.stdin)["access_token"])')
+| Method and path | Access | Purpose |
+|---|---|---|
+| `POST /jobs` | Authenticated | Upload an image/video as multipart field `file` and enqueue analysis. |
+| `GET /jobs/mine` | Authenticated | List the caller's jobs with processing and approval statuses; supports `limit` and `offset`. |
+| `GET /jobs/{job_id}` | Owner/manager/admin | Get a job's current status and result; non-admins can access their own jobs. |
+| `DELETE /jobs/{job_id}` | Owner/manager/admin | Cancel an owned job when it has not started processing. |
+| `GET /jobs/{job_id}/media` | Owner/manager/admin | Download the protected original upload. |
+| `GET /jobs/review` | Manager/admin | List completed jobs awaiting review. |
+| `GET /jobs/approved` | Manager/admin | List completed, approved jobs. |
+| `GET /jobs/rejected` | Manager/admin | List completed, rejected jobs. |
+| `PATCH /jobs/{job_id}/approval` | Manager/admin | Approve or reject a completed job. |
+| `GET /jobs` | Admin | Search/list jobs, with pagination and optional media-kind filter. |
+| `GET /stats` | Admin | Read queue depths and today's Gemini call count. |
 
-curl -fsS http://127.0.0.1:8000/api/v1/jobs \
-  -H "Authorization: Bearer $TOKEN" \
-  -F 'file=@uploads/cat.png'
-```
-The POST response includes the generated `result` when the worker finishes within five minutes.
-If it remains queued after five minutes, the response has a null `result`; fetch
-`GET /api/v1/jobs/{job_id}` to check later. Send JWTs with the `Authorization: Bearer <token>`
-header. These are real Gemini jobs, so the worker requires valid credentials and may incur API
-usage.
+Review items include the submitter's email and protected media URL. Once a job is approved or
+rejected, it no longer appears in the pending review list. Upload responses include the result
+when processing finishes during the response wait; otherwise the API returns `202 Accepted` and
+the job can be checked later.
 
-This is a self-hosted starter backend, not a fully hardened public deployment: registration is
-restricted to managers/admins, access tokens are not revocable before expiry, and upload files
-are retained in the storage directory. Put it behind HTTPS and a reverse proxy with request-size
-and auth rate limits before public exposure; define and implement a media-retention policy for
-your deployment.
+Supported uploads are JPG/JPEG, PNG, WebP, MP4, MOV, and WebM. Defaults are 10 MB per image,
+100 MB per processed video, and 1 GB per uploaded video before compression; configure these in
+`.env`. The same bytes uploaded more than once are stored once. A filename collision with
+different content is handled using a short content-hash suffix, while each job retains its
+original filename.
 
-## Files
-| File | Job |
+### Calendar-only scheduling
+
+| Method and path | Access | Purpose |
+|---|---|---|
+| `POST /jobs/{job_id}/schedule` | Job owner | Schedule a future time for a completed, approved job. |
+| `GET /scheduled-posts` | Authenticated | List posts for a date range. |
+| `GET /calendar` | Authenticated | Get date-grouped posts for a date range. |
+| `GET /scheduled-posts/{post_id}` | Owner/admin | Inspect a scheduled post. |
+| `PATCH /scheduled-posts/{post_id}` | Owner/admin | Change its scheduled time or timezone. |
+| `DELETE /scheduled-posts/{post_id}` | Owner/admin | Mark it cancelled. |
+
+Provide `start`, `end`, and an IANA `timezone` (for example `Asia/Karachi`) to list or query the
+calendar. Ranges may not exceed 93 days; calendar responses are capped at 1,000 posts. Schedule
+timestamps must include a UTC offset and must be in the future. The API stores timestamps in UTC
+and converts them for calendar display. A job may have only one scheduled entry. Cancelled entries
+remain stored and visible with their cancelled status.
+
+Scheduling is only a planning record. A scheduled time does not trigger a social post or an
+automatic task.
+
+### Health checks
+
+| Method and path | Purpose |
 |---|---|
-| `app/config.py` | env settings, validated; key + model required |
-| `app/media.py` | validate, hash original bytes, shrink images |
-| `app/redis_queue.py` | reliable queue: lease, reap, defer, dead-letter |
-| `app/delayqueue.py` | atomic ZSET->LIST promotion |
-| `app/limiter.py` | RPM bucket + daily cap + fleet cooldown + backoff |
-| `app/jobs.py` | job records, submit, dedup |
-| `app/gemini_client.py` | GeminiClient + error mapping |
-| `app/worker.py` | claim -> limit -> call -> store -> ack |
-| `app/cli.py` | submit, worker, status, stats |
-| `app/api/` | FastAPI routes, JWT auth, PostgreSQL user/job index |
-| `migrations/` | Alembic schema migrations |
-| `tests/helpers.py` | scripted Gemini stand-in, TESTS ONLY |
-| `tests/` | unit, integration, live |
+| `GET /health/live` | Check that the API process is alive. |
+| `GET /health/ready` | Check PostgreSQL, required tables, and Redis availability. |
 
-## Job states
-`queued` -> `processing` -> `done`
-`waiting` (same upload already running) -> `done`
-`retrying` (429/5xx, back in line after backoff) | `failed` (bad input) | `dead` (retries used up)
+## Job lifecycle
 
-## Settings (env)
-See `.env.example`. Key ones: `REDIS_URL`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_RPM`, `GEMINI_RPD`, `QUEUE_LEASE_S` (must exceed slowest video), `QUEUE_MAX_ATTEMPTS`, `MAX_IMAGE_MB`, `MAX_VIDEO_MB`, `MAX_VIDEO_UPLOAD_MB`, `IMAGE_MAX_SIDE`, `VIDEO_FPS`. Large videos are accepted up to `MAX_VIDEO_UPLOAD_MB` (default 1024 MB) and compressed on the worker to fit `MAX_VIDEO_MB` (default 100 MB), using ffmpeg. Install it on every worker with `sudo apt install ffmpeg`.
+Queue/analysis statuses commonly include:
 
-## Next component (after you tick docs/DEFINITION_OF_DONE.md)
-Postgres schema + migrations, then FastAPI upload endpoint. See `docs/COMPONENT_CARD_media_queue.md`.
+- `queued`: waiting for a worker.
+- `processing`: a worker is analyzing the media.
+- `waiting`: the same media is already being processed by another job.
+- `retrying`: a retryable failure is waiting for backoff.
+- `done`: Gemini returned a result.
+- `failed`: a non-retryable error occurred.
+- `dead`: the job exhausted its retry limit.
+- `cancelled`: a queued job or calendar entry was cancelled.
+
+Approval is tracked separately: `pending`, `approved`, or `rejected`. Only jobs with analysis status
+`done` and approval status `approved` can be scheduled.
+
+## Configuration
+
+See [.env.example](./.env.example). Common settings:
+
+| Variable | Purpose |
+|---|---|
+| `REDIS_URL` | Redis connection used by the queue and limiter. |
+| `QUEUE_PREFIX` | Namespace for this application's Redis keys. |
+| `DATABASE_URL` | PostgreSQL SQLAlchemy connection string. |
+| `JWT_SECRET` | Secret used to sign access tokens; at least 32 bytes. |
+| `ACCESS_TOKEN_TTL_MINUTES` | JWT lifetime; defaults to 30 minutes. |
+| `MEDIA_STORAGE_DIR` | Persistent upload storage directory; defaults to `uploads`. |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Required Gemini credentials and model identifier. |
+| `GEMINI_RPM`, `GEMINI_RPD`, `GEMINI_BURST` | Shared per-minute, daily, and burst call limits. |
+| `QUEUE_LEASE_S`, `QUEUE_MAX_ATTEMPTS` | Worker lease duration and retry limit. |
+| `MAX_IMAGE_MB`, `MAX_VIDEO_MB`, `MAX_VIDEO_UPLOAD_MB` | Media upload/processing limits. |
+| `IMAGE_MAX_SIDE`, `VIDEO_FPS` | Image resize and video sampling settings. |
+| `RESULT_TTL_S`, `JOB_TTL_S`, `INFLIGHT_TTL_S` | Redis result, job, and in-flight record lifetimes. |
+
+## Development and tests
+
+```bash
+source .venv/bin/activate
+export REDIS_URL=redis://localhost:6379/0
+
+make lint          # Ruff
+make unit          # unit tests
+make integration   # Redis-backed integration tests
+make cov           # all non-live tests plus coverage (85% minimum)
+make done          # lint, unit, integration, and coverage
+```
+
+Live tests are separate and may call Gemini:
+
+```bash
+make live
+```
+
+The test suite's Gemini stand-in is under `tests/` and is not used by the application at runtime.
+Integration tests use a unique Redis key prefix per test; do not clear a shared Redis database to
+clean up tests.
+
+## Project layout
+
+| Path | Responsibility |
+|---|---|
+| `app/api/` | FastAPI routes, authentication, schemas, database models, and media storage. |
+| `app/cli.py` | Command-line job submission, status/stats, and worker entry point. |
+| `app/jobs.py` | Job records, submission, and deduplication. |
+| `app/redis_queue.py`, `app/delayqueue.py` | Reliable Redis queues, delayed retries, and recovery. |
+| `app/worker.py` | Queue worker and Gemini job processing. |
+| `app/gemini_client.py` | Gemini client and provider error handling. |
+| `app/limiter.py` | Redis-backed shared rate limits, daily quota, cooldown, and backoff. |
+| `app/media.py` | Media validation, hashing, image preparation, and video compression. |
+| `app/system_prompt.py` | Instructions for media analysis and content-draft generation. |
+| `migrations/` | Alembic schema history. |
+| `tests/` | Unit, integration, and optional live tests. |
+
+## Deployment notes
+
+This is a self-hosted starter backend, not a fully hardened public deployment. Put it behind
+HTTPS and a reverse proxy with request-size and authentication rate limits before exposing it
+publicly. Use strong secrets, secure PostgreSQL/Redis, persist the media directory, back up the
+database, and define a media-retention policy. Protect `.env` and any uploaded media as sensitive
+data.

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import io
+import shutil
+import subprocess
 import threading
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -442,6 +445,137 @@ def test_manager_review_lists_and_approval_actions(api_client, make_image):
         ).status_code
         == 409
     )
+
+
+def test_image_video_review_and_calendar_user_workflow(
+    api_client, make_image, make_video, tmp_path
+):
+    client, runtime = api_client
+    _, manager = create_account(client, "workflow-manager@example.com", role="manager")
+    _, owner = create_account(client, "workflow-owner@example.com")
+    _, other_user = create_account(client, "workflow-other@example.com")
+    manager_headers = {"Authorization": "Bearer " + manager}
+    owner_headers = {"Authorization": "Bearer " + owner}
+    other_headers = {"Authorization": "Bearer " + other_user}
+
+    image_path = Path(make_image(name="workflow-image.png"))
+    video_path = tmp_path / "workflow-video.mp4"
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        video_path = Path(make_video(name="workflow-video.mp4"))
+    else:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1:r=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    uploaded_jobs = {}
+    for kind, path, mime in (
+        ("image", image_path, "image/png"),
+        ("video", video_path, "video/mp4"),
+    ):
+        response = client.post(
+            "/api/v1/jobs",
+            headers=owner_headers,
+            files={"file": (path.name, path.read_bytes(), mime)},
+        )
+        assert response.status_code == 202, response.text
+        uploaded_jobs[kind] = response.json()["job_id"]
+
+    runtime.worker.drain()
+    mine = client.get("/api/v1/jobs/mine", headers=owner_headers)
+    assert mine.status_code == 200
+    mine_by_id = {item["job_id"]: item for item in mine.json()["items"]}
+    assert set(uploaded_jobs.values()) <= mine_by_id.keys()
+    for kind, job_id in uploaded_jobs.items():
+        assert mine_by_id[job_id]["status"] == "done"
+        assert mine_by_id[job_id]["approval_status"] == "pending"
+        assert mine_by_id[job_id]["media_kind"] == kind
+        assert mine_by_id[job_id]["result"]["text"].startswith("scripted analysis")
+    assert client.get("/api/v1/jobs/mine", headers=other_headers).json()["items"] == []
+
+    review = client.get("/api/v1/jobs/review", headers=manager_headers)
+    assert review.status_code == 200
+    assert set(uploaded_jobs.values()) <= {
+        item["job_id"] for item in review.json()["items"]
+    }
+
+    approved_id = uploaded_jobs["image"]
+    rejected_id = uploaded_jobs["video"]
+    for job_id, decision in ((approved_id, "approved"), (rejected_id, "rejected")):
+        response = client.patch(
+            f"/api/v1/jobs/{job_id}/approval",
+            headers=manager_headers,
+            json={"status": decision},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["approval_status"] == decision
+
+    remaining_review_ids = {
+        item["job_id"]
+        for item in client.get("/api/v1/jobs/review", headers=manager_headers).json()["items"]
+    }
+    assert not (set(uploaded_jobs.values()) & remaining_review_ids)
+
+    scheduled_at = datetime.now(timezone.utc) + timedelta(days=2)
+    schedule_payload = {
+        "scheduled_at": scheduled_at.isoformat(),
+        "timezone": "Asia/Karachi",
+    }
+    scheduled = client.post(
+        f"/api/v1/jobs/{approved_id}/schedule",
+        headers=owner_headers,
+        json=schedule_payload,
+    )
+    assert scheduled.status_code == 201, scheduled.text
+    scheduled_post = scheduled.json()
+    assert scheduled_post["original_filename"] == image_path.name
+
+    rejected_schedule = client.post(
+        f"/api/v1/jobs/{rejected_id}/schedule",
+        headers=owner_headers,
+        json=schedule_payload,
+    )
+    assert rejected_schedule.status_code == 409
+
+    local_date = scheduled_post["local_date"]
+    calendar = client.get(
+        "/api/v1/calendar",
+        headers=owner_headers,
+        params={
+            "start": local_date,
+            "end": local_date,
+            "timezone": "Asia/Karachi",
+        },
+    )
+    assert calendar.status_code == 200, calendar.text
+    calendar_posts = calendar.json()["days"][0]["posts"]
+    assert [post["id"] for post in calendar_posts] == [scheduled_post["id"]]
+    assert client.get(
+        "/api/v1/calendar",
+        headers=other_headers,
+        params={
+            "start": local_date,
+            "end": local_date,
+            "timezone": "Asia/Karachi",
+        },
+    ).json()["days"][0]["posts"] == []
 
 
 def test_uploads_reuse_identical_media_and_preserve_original_names(api_client, make_image):
