@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 
 from app.api.config import ApiSettings
@@ -17,6 +19,8 @@ from app.api.routes import router
 from app.config import Settings
 from app.wiring import Runtime, build_runtime
 
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
 
 def create_app(
     *,
@@ -25,6 +29,7 @@ def create_app(
     runtime: Runtime | None = None,
     engine=None,
     session_factory=None,
+    frontend_dir: Path | None = FRONTEND_DIST,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -78,6 +83,11 @@ def create_app(
                 "Database or Redis is unavailable",
             ) from None
         return {"status": "ready"}
+
+    # Serve the built web app (frontend/dist) from the same origin when it exists.
+    # Mounted last so API, docs, and health routes always win.
+    if frontend_dir is not None and (frontend_dir / "index.html").is_file():
+        application.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
     return application
 

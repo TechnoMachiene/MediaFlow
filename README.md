@@ -1,6 +1,6 @@
 # MediaFlow — AI Media Analysis & Content Calendar
 
-MediaFlow is a self-hosted backend for uploading images and videos, generating social-media
+MediaFlow is a self-hosted app (FastAPI backend plus a React web app) for uploading images and videos, generating social-media
 content drafts with Google Gemini, reviewing jobs with role-based accounts, and planning approved
 posts on a timezone-aware calendar.
 
@@ -20,12 +20,13 @@ posts on a timezone-aware calendar.
 - Lets managers/admins review completed work and approve or reject it.
 - Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
 - Stores schedule instants in UTC and displays them in the requested IANA timezone.
+- Ships a responsive web app (`frontend/`) covering upload, review, calendar, team, and queue
+  activity.
 - Includes automated unit and integration tests that use synthetic media and a scripted Gemini
   client; live Gemini tests are separate.
 
 ## What it does not do
 
-- It has no web frontend; use the API and its interactive docs at `/docs`.
 - It does not connect social accounts, send posts to platform APIs, or publish automatically when
   a calendar date arrives.
 - It does not provide in-app notifications for review results or scheduled dates.
@@ -207,6 +208,38 @@ retention policy appropriate for your deployment.
 
 Interactive API documentation: <http://127.0.0.1:8000/docs>
 
+### 4. Web app
+
+The web app lives in `frontend/` (React, TypeScript, Vite; needs Node.js 20.19 or newer).
+
+```bash
+make web        # install dependencies and build frontend/dist
+```
+
+When `frontend/dist` exists, the API serves it at <http://127.0.0.1:8000/>, so one origin hosts
+both the app and the API. Restart `uvicorn` after the first build so it picks the folder up.
+
+For frontend development with hot reload, keep the API running and start Vite in a third
+terminal. It serves <http://127.0.0.1:5173> and proxies `/api` and `/health` to the API
+(override the target with `MEDIAFLOW_API=http://host:port`):
+
+```bash
+make web-dev
+```
+
+Sign in with an account created by the admin command above. What each role sees:
+
+| Screen | Who | What it does |
+|---|---|---|
+| Library | Everyone | Upload (button or drag and drop), follow analysis, read and copy drafts, cancel queued jobs, schedule approved drafts. |
+| Review | Manager/admin | Approve or reject finished drafts; browse approved and rejected ones. |
+| Calendar | Everyone | Month view of planned posts in any timezone; reschedule or cancel. |
+| Team | Manager/admin | Add people; admins can also edit roles, reset passwords, and remove accounts. |
+| Activity | Admin | Queue depths, Gemini calls today, service health, and every job. |
+
+The access token is kept in the browser's session storage and expires after
+`ACCESS_TOKEN_TTL_MINUTES`; the app then asks you to sign in again.
+
 ## API reference
 
 All application endpoints below use the `/api/v1` prefix unless noted otherwise. Authenticated
@@ -217,6 +250,7 @@ endpoints expect `Authorization: Bearer <access_token>`.
 | Method and path | Access | Purpose |
 |---|---|---|
 | `POST /auth/login` | Public | Log in and receive a bearer token. |
+| `GET /auth/me` | Authenticated | Return the caller's own account (id, email, role). |
 | `POST /users` | Manager/admin | Create a user or manager; admins can also create admins. |
 | `GET /users`, `GET /users/{user_id}` | Admin | List users or get one user. |
 | `PATCH /users/{user_id}` | Admin | Update supported account fields. |
@@ -343,6 +377,7 @@ clean up tests.
 
 | Path | Responsibility |
 |---|---|
+| `frontend/` | React web app; `npm run build` writes `frontend/dist`, which the API serves. |
 | `app/api/` | FastAPI routes, authentication, schemas, database models, and media storage. |
 | `app/cli.py` | Command-line job submission, status/stats, and worker entry point. |
 | `app/jobs.py` | Job records, submission, and deduplication. |

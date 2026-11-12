@@ -821,3 +821,32 @@ def test_admin_password_reset_revokes_existing_tokens(api_client):
         ).status_code
         == 403
     )
+
+
+def test_auth_me_returns_the_callers_account(api_client):
+    client, _ = api_client
+    user_id, token = create_account(client, "me@example.com", role="manager")
+
+    assert client.get("/api/v1/auth/me").status_code == 401
+    response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == user_id
+    assert body["email"] == "me@example.com"
+    assert body["role"] == "manager"
+    assert "password_hash" not in body
+
+
+def test_built_frontend_is_served_without_shadowing_the_api(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>MediaFlow</title>")
+
+    # No lifespan needed: static files and liveness don't touch the database or Redis.
+    client = TestClient(create_app(frontend_dir=dist))
+    assert "MediaFlow" in client.get("/").text
+    assert client.get("/health/live").json() == {"status": "alive"}
+
+    without = TestClient(create_app(frontend_dir=tmp_path / "missing"))
+    assert without.get("/").status_code == 404
+    assert without.get("/health/live").status_code == 200

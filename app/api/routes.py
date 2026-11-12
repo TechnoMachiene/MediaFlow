@@ -258,6 +258,11 @@ def login(payload: Credentials, request: Request, db: DbSession):
     return _token(request, user)
 
 
+@router.get("/auth/me", response_model=UserView)
+def read_current_user(user: CurrentUser):
+    return UserView(id=user.id, email=user.email, role=user.role, created_at=user.created_at)
+
+
 def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) -> JobView:
     live_status = data.get("status", "unknown")
     if live_status == "unknown":
