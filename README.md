@@ -4,12 +4,19 @@ MediaFlow is a multi-tenant app (FastAPI backend plus a React web app) for uploa
 videos, generating social-media content drafts with Google Gemini, reviewing jobs with
 role-based workspaces, and planning approved posts on a timezone-aware calendar.
 
-## Try the demo: one command, no Gemini key
+## Try the demo: no Gemini key, nothing to install
 
-All you need is Docker. No `.env`, no API key, no other setup:
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/TechnoMachiene/mgc_viral_machine?quickstart=1)
+
+**In your browser:** click the button above (you need a free GitHub account). GitHub builds a
+private copy, starts the demo, and opens it in a new tab, which takes a few minutes the first
+time. Then sign in with one of the accounts below. It runs on your GitHub Codespaces quota
+(personal accounts get free hours each month), and only you can open your demo's URL.
+
+**On your machine,** with only Docker installed (no `.env`, no API key):
 
 ```bash
-git clone <this repo> && cd media_queue
+git clone https://github.com/TechnoMachiene/mgc_viral_machine.git && cd mgc_viral_machine
 docker compose -f compose.demo.yaml up --build
 ```
 

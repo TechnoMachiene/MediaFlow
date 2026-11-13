@@ -1,0 +1,26 @@
+{
+  // One click from the README: GitHub builds this, installs dependencies, starts the demo and
+  // opens it in a new browser tab. No Gemini key, no local install.
+  "name": "MediaFlow demo",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "shutdownAction": "stopCompose",
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/start-demo.sh",
+
+  "forwardPorts": [8082],
+  "portsAttributes": {
+    "8082": { "label": "MediaFlow demo", "onAutoForward": "openBrowser" }
+  },
+
+  "hostRequirements": { "cpus": 2, "memory": "4gb" },
+
+  "customizations": {
+    "codespaces": { "openFiles": [".devcontainer/WELCOME.md"] },
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff"]
+    }
+  }
+}

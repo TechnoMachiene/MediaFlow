@@ -1,0 +1,17 @@
+# The Codespace: the dev container plus a Redis sidecar. The demo uses SQLite and a worker
+# inside the API process, so nothing else is needed.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ../..:/workspaces:cached
+    command: sleep infinity          # the demo is started by start-demo.sh
+    environment:
+      REDIS_URL: redis://redis:6379/0   # used by the demo and by `make done`
+    depends_on: [redis]
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
