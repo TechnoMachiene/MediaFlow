@@ -18,9 +18,19 @@ if curl -fsS "$URL/health/live" >/dev/null 2>&1; then
   exit 0
 fi
 
+# This Codespace's own login-signing key: random, created once, kept across restarts, never in
+# the repo. (Without it demo mode would use a fixed key that is public in the source, and
+# anyone with a public demo URL could forge a login.)
+SECRET_FILE="${HOME}/.mediaflow/demo-jwt-secret"
+if [ ! -s "$SECRET_FILE" ]; then
+  mkdir -p "$(dirname "$SECRET_FILE")"
+  (umask 077 && python -c 'import secrets; print(secrets.token_hex(32))' >"$SECRET_FILE")
+fi
+JWT_SECRET="$(cat "$SECRET_FILE")"
+
 echo "== Starting the MediaFlow demo (log: $LOG)"
 # Blank GEMINI_API_KEY: demo mode refuses to run next to a real key.
-DEMO_MODE=1 GEMINI_API_KEY= QUEUE_PREFIX=demo \
+JWT_SECRET="$JWT_SECRET" DEMO_MODE=1 GEMINI_API_KEY= QUEUE_PREFIX=demo \
 DATABASE_URL=sqlite:///demo.sqlite3 MEDIA_STORAGE=local MEDIA_STORAGE_DIR=demo-uploads \
 EMBEDDED_WORKER=1 LOG_FORMAT=text \
   nohup setsid python -m uvicorn app.api.main:app --host 0.0.0.0 --port "$PORT" \

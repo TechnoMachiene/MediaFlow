@@ -9,6 +9,8 @@
 
   "postCreateCommand": "bash .devcontainer/setup.sh",
   "postStartCommand": "bash .devcontainer/start-demo.sh",
+  // Public port: avoids GitHub's port sign-in (HTTP 401 in browsers that block its cookie).
+  "postAttachCommand": "bash .devcontainer/make-port-public.sh",
 
   "forwardPorts": [8082],
   "portsAttributes": {

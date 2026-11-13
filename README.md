@@ -11,7 +11,9 @@ role-based workspaces, and planning approved posts on a timezone-aware calendar.
 **In your browser:** click the button above (you need a free GitHub account). GitHub builds a
 private copy, starts the demo, and opens it in a new tab, which takes a few minutes the first
 time. Then sign in with one of the accounts below. It runs on your GitHub Codespaces quota
-(personal accounts get free hours each month), and only you can open your demo's URL.
+(personal accounts get free hours each month). The demo port is made public so it opens in any
+browser without GitHub's port sign-in; the link is long and random, and each Codespace signs
+logins with its own key.
 
 **On your machine,** with only Docker installed (no `.env`, no API key):
 

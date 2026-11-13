@@ -22,8 +22,14 @@ The sign-in page has one-click **Continue as …** buttons, or use:
 3. Sign out, **Continue as Member**, open the draft, and schedule it.
 4. Open **Calendar** to see it planned.
 
-Drafts are written by an offline stand-in, not Gemini. No API key is used, and nothing leaves
-this Codespace. Only you can open the demo URL (GitHub signs you in to it).
+Drafts are written by an offline stand-in, not Gemini. No API key is used.
+
+**About the demo link:** the demo port is set to *public*, so it opens in any browser without
+GitHub's port sign-in, which some browsers block with "HTTP ERROR 401". Anyone with this
+Codespace's link can open the demo, so share it only if you mean to. The link is long and
+random, logins are signed with a key unique to this Codespace, and it holds only demo data.
+To make it private, right-click port 8082 in the **Ports** tab and choose
+**Port Visibility → Private**.
 
 ## Useful commands (in the terminal below)
 
