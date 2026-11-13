@@ -20,6 +20,17 @@ def _num(name: str, default, cast, minimum=None):
     return value
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name} must be 1/0 or true/false, got {raw!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     redis_url: str
@@ -39,18 +50,31 @@ class Settings:
     max_video_upload_mb: int
     image_max_side: int
     video_fps: float
+    # Demo mode: no Gemini credentials; a deterministic offline client writes the drafts.
+    demo_mode: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
+        demo = env_flag("DEMO_MODE")
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         model = os.environ.get("GEMINI_MODEL", "").strip()
-        if not api_key:
-            raise ConfigError("GEMINI_API_KEY missing. Put it in .env (see .env.example).")
+        prefix = os.environ.get("QUEUE_PREFIX", "").strip()
+        if demo:
+            from app.demo import DEMO_MODEL, DEMO_QUEUE_PREFIX, check_demo_isolation
+
+            # The scripted provider must never sit next to real credentials or a real queue.
+            model, prefix = DEMO_MODEL, prefix or DEMO_QUEUE_PREFIX
+            check_demo_isolation(api_key=api_key, prefix=prefix)
+        elif not api_key:
+            raise ConfigError(
+                "GEMINI_API_KEY missing. Put it in .env (see .env.example), "
+                "or set DEMO_MODE=1 to try the app without Gemini."
+            )
         if not model:
             raise ConfigError("GEMINI_MODEL missing. Copy exact model id from AI Studio.")
         return cls(
             redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-            prefix=os.environ.get("QUEUE_PREFIX", "ma"),
+            prefix=prefix or "ma",
             api_key=api_key,
             model=model,
             # Defaults are deliberately LOW. Replace with real numbers from AI Studio.
@@ -67,4 +91,5 @@ class Settings:
             max_video_upload_mb=_num("MAX_VIDEO_UPLOAD_MB", 1024, int, 1),
             image_max_side=_num("IMAGE_MAX_SIDE", 1024, int, 64),
             video_fps=_num("VIDEO_FPS", 1.0, float, 0.01),
+            demo_mode=demo,
         )

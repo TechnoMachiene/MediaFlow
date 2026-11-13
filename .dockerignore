@@ -1,0 +1,28 @@
+# Secrets and local state never enter the image.
+.env
+.env.*
+!.env.example
+.secrets/
+secrets/
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*.db
+uploads/
+demo-uploads/
+
+# Tooling and build output (the frontend is rebuilt inside the image).
+.git/
+.github/
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+frontend/node_modules/
+frontend/dist/
+.agents/
+*.ipynb
+tests/

@@ -1,8 +1,17 @@
 """Worker: claim -> limiter -> Gemini -> store result -> ack.
-Failures never lose a job: retry (deferred with backoff), dead-letter, or fail permanently."""
+Failures never lose a job: retry (deferred with backoff), dead-letter, or fail permanently.
+
+Two optional hooks connect the worker to the durable database (see docs/JOB_LIFECYCLE.md):
+- on_result(job_id, result): MUST succeed before the job is acked; a failure re-defers the job
+  and the next claim replays the result from the Redis cache instead of calling Gemini again.
+- on_status(job_id, status, error): best effort (processing/retrying/failed/dead). If it fails,
+  the reconciler copies the status from Redis later.
+"""
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import logging
 import threading
 import time
@@ -29,11 +38,31 @@ class Worker:
         sleep=time.sleep,
         backoff=backoff_s,
         on_result: Callable[[str, dict], None] | None = None,
+        on_status: Callable[[str, str, str | None], None] | None = None,
+        materialize: Callable[[str], contextlib.AbstractContextManager[str]] | None = None,
     ):
         self.queue, self.store, self.limiter, self.client = queue, store, limiter, client
         self.max_attempts, self.max_inline_wait_s = max_attempts, max_inline_wait_s
         self.sleep, self.backoff = sleep, backoff
         self.on_result = on_result
+        self.on_status = on_status
+        # Turns the job's media ref into a local file (identity for local storage).
+        self.materialize = materialize or contextlib.nullcontext
+        # (interval_s, fn, next_due) - housekeeping run from the worker loop.
+        self._periodic: list[list] = []
+
+    def every(self, interval_s: float, fn: Callable[[], object]) -> None:
+        """Run `fn` from the worker loop at most once per `interval_s` (first run: immediately)."""
+        self._periodic.append([interval_s, fn, 0.0])
+
+    def _notify(self, job_id: str, status: str, error: str | None = None) -> None:
+        if self.on_status is None:
+            return
+        try:
+            self.on_status(job_id, status, error)
+        except Exception:
+            log.warning("could not record status %s for job %s; reconciler will retry",
+                        status, job_id, exc_info=True)
 
     def process_one(self) -> str:
         """Returns: idle | missing | cached | deferred | done | retry | dead | failed"""
@@ -66,10 +95,16 @@ class Worker:
 
         attempts = self.store.incr_attempts(jid)
         self.store.mark(jid, status="processing")
+        self._notify(jid, "processing")
         try:
-            result = self.client.analyse(job.spec())
+            with self.materialize(job.path) as local_path:
+                spec = job.spec()
+                if local_path != spec.path:
+                    spec = dataclasses.replace(spec, path=local_path)
+                result = self.client.analyse(spec)
         except Permanent as e:
             self.store.finish_failed(job, "failed", str(e))
+            self._notify(jid, "failed", str(e))
             self.queue.ack(jid)
             return "failed"
         except (RateLimited, Transient) as e:
@@ -96,19 +131,32 @@ class Worker:
 
     def _retry_or_dead(self, job, attempts: int, err: Exception, rate_limited: bool) -> str:
         if attempts >= self.max_attempts:
-            self.store.finish_failed(job, "dead", f"gave up after {attempts} attempts: {err}")
+            message = f"gave up after {attempts} attempts: {err}"
+            self.store.finish_failed(job, "dead", message)
             self.queue.dead_letter(job.job_id)
+            self._notify(job.job_id, "dead", message)
             return "dead"
         delay = self.backoff(attempts)
         if rate_limited:
             self.limiter.cooldown(delay)  # whole fleet pauses
         self.store.mark(job.job_id, status="retrying", error=str(err)[:300])
         self.queue.defer(job.job_id, delay)
+        self._notify(job.job_id, "retrying", str(err)[:300])
         return "retry"
 
     def maintenance(self) -> None:
         self.queue.promote_deferred()
         self.queue.reap()
+        now = time.monotonic()
+        for task in self._periodic:
+            interval, fn, due = task
+            if now < due:
+                continue
+            task[2] = now + interval
+            try:
+                fn()
+            except Exception:
+                log.exception("periodic task %s failed", getattr(fn, "__name__", fn))
 
     def run(self, stop: threading.Event, poll_s: float = 1.0) -> None:
         while not stop.is_set():

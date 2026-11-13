@@ -128,6 +128,13 @@ class GeminiClient:
 
 
 def build_client(settings) -> AnalysisClient:
+    """The only place the app picks a provider. The scripted DemoClient exists solely for
+    DEMO_MODE=1, and is re-checked here so hand-built Settings can't bypass the guard."""
+    if getattr(settings, "demo_mode", False):
+        from app.demo import DemoClient, check_demo_isolation
+
+        check_demo_isolation(api_key=settings.api_key, prefix=settings.prefix)
+        return DemoClient()
     return GeminiClient(
         api_key=settings.api_key,
         image_max_side=settings.image_max_side,

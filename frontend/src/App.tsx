@@ -2,10 +2,10 @@ import { MotionConfig } from 'motion/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, auth, clearMedia } from './api';
 import { isAdmin, isReviewer, roleLabel } from './lib';
-import { SessionContext } from './session';
+import { SessionContext, useSession } from './session';
 import { Sheet } from './Sheet';
 import { ToastProvider } from './toast';
-import type { User } from './types';
+import type { Me, Meta, User } from './types';
 import { Button, Icon, Spinner, type IconName } from './ui';
 import { uploads } from './uploads';
 import { Activity } from './views/Activity';
@@ -25,21 +25,24 @@ const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boole
 ];
 
 const readRoute = () => window.location.hash.replace(/^#\/?/, '');
+const NO_META: Meta = { demo_mode: false, allow_signup: false, demo_password: null, demo_accounts: [] };
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<Me | null>(null);
+  const [meta, setMeta] = useState<Meta>(NO_META);
   const [booting, setBooting] = useState(auth.token !== null);
   const [notice, setNotice] = useState('');
 
   useEffect(() => {
+    api<Meta>('GET', '/meta').then(setMeta, () => {});
     auth.onUnauthorized(() => {
       clearMedia();
       setUser(null);
       setNotice('Your session ended. Sign in again to continue.');
     });
     if (auth.token) {
-      api<User>('GET', '/auth/me')
-        .then(setUser, () => {})
+      api<Me>('GET', '/auth/me')
+        .then(setUser, () => auth.setWorkspace(null))
         .finally(() => setBooting(false));
     }
   }, []);
@@ -52,26 +55,67 @@ export default function App() {
     setUser(null);
   }, []);
 
-  const session = useMemo(() => (user ? { user, signOut } : null), [user, signOut]);
+  const switchWorkspace = useCallback((id: string) => {
+    const previous = auth.workspace;
+    auth.setWorkspace(id);
+    api<Me>('GET', '/auth/me').then(
+      (me) => {
+        clearMedia();
+        uploads.reset();
+        setUser(me);
+      },
+      () => auth.setWorkspace(previous),
+    );
+  }, []);
+
+  const session = useMemo(
+    () => (user ? { user, signOut, switchWorkspace } : null),
+    [user, signOut, switchWorkspace],
+  );
 
   return (
     <MotionConfig reducedMotion="user">
       <ToastProvider>
+        {meta.demo_mode && (
+          <p className="demo-banner" role="note">
+            <strong>Demo mode.</strong> Drafts are written by an offline stand-in, not Gemini.
+          </p>
+        )}
         {booting ? (
           <div className="boot"><Spinner /></div>
         ) : session ? (
           <SessionContext.Provider value={session}>
-            <Shell user={session.user} signOut={signOut} />
+            {/* Remount every view when the workspace changes so no tenant's data lingers. */}
+            <Shell key={session.user.workspace.id} user={session.user} signOut={signOut} />
           </SessionContext.Provider>
         ) : (
-          <Login notice={notice} onSignedIn={(u) => { setNotice(''); setUser(u); }} />
+          <Login
+            notice={notice} meta={meta}
+            onSignedIn={(u) => { setNotice(''); setUser(u); }}
+          />
         )}
       </ToastProvider>
     </MotionConfig>
   );
 }
 
-function Shell({ user, signOut }: { user: User; signOut: () => void }) {
+export function WorkspaceSwitcher({ user, onSwitch }: { user: Me; onSwitch: (id: string) => void }) {
+  if (user.workspaces.length < 2) {
+    return <span className="workspace-name" title={user.workspace.name}>{user.workspace.name}</span>;
+  }
+  return (
+    <label className="workspace-switch">
+      <span className="visually-hidden">Workspace</span>
+      <select value={user.workspace.id} onChange={(e) => onSwitch(e.target.value)}>
+        {user.workspaces.map((w) => (
+          <option key={w.id} value={w.id}>{w.name} · {roleLabel[w.role]}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function Shell({ user, signOut }: { user: Me; signOut: () => void }) {
   const [hash, setHash] = useState(readRoute);
   const [account, setAccount] = useState(false);
 
@@ -115,6 +159,7 @@ function Shell({ user, signOut }: { user: User; signOut: () => void }) {
           </span>
           MediaFlow
         </div>
+        <SwitcherFromSession user={user} />
         <nav aria-label="Main">{links('nav-link')}</nav>
         <div className="sidebar-account">
           <span className="avatar" aria-hidden="true">{user.email[0].toUpperCase()}</span>
@@ -137,9 +182,15 @@ function Shell({ user, signOut }: { user: User; signOut: () => void }) {
           <span className="avatar avatar-lg" aria-hidden="true">{user.email[0].toUpperCase()}</span>
           <strong>{user.email}</strong>
           <span className="quiet">{roleLabel[user.role]}</span>
+          <SwitcherFromSession user={user} />
           <Button onClick={signOut}>Sign out</Button>
         </div>
       </Sheet>
     </div>
   );
+}
+
+function SwitcherFromSession({ user }: { user: Me }) {
+  const { switchWorkspace } = useSession();
+  return <WorkspaceSwitcher user={user} onSwitch={switchWorkspace} />;
 }

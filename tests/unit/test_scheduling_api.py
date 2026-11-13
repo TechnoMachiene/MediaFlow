@@ -11,9 +11,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.config import ApiSettings
-from app.api.database import ApiJob, Base, ScheduledPost, User
+from app.api.database import ApiJob, Base, ScheduledPost, User, Workspace, WorkspaceMember
 from app.api.main import create_app
 from app.api.security import hash_password
+from app.storage import LocalStorage
 
 pytestmark = pytest.mark.unit
 
@@ -44,6 +45,7 @@ def scheduling_api(tmp_path):
         media_storage_dir=Path(tmp_path),
     )
     with sessions.begin() as db:
+        db.add(Workspace(id="ws-1", name="Scheduling"))
         db.add_all(
             [
                 User(
@@ -66,6 +68,14 @@ def scheduling_api(tmp_path):
                 ),
             ]
         )
+        db.flush()
+        db.add_all(
+            [
+                WorkspaceMember(workspace_id="ws-1", user_id="schedule-owner", role="user"),
+                WorkspaceMember(workspace_id="ws-1", user_id="other-owner", role="user"),
+                WorkspaceMember(workspace_id="ws-1", user_id="schedule-admin", role="admin"),
+            ]
+        )
         for job_id, owner_id, approval_status in (
             ("schedule-job-1", "schedule-owner", "approved"),
             ("pending-job", "schedule-owner", "pending"),
@@ -75,6 +85,7 @@ def scheduling_api(tmp_path):
             db.add(
                 ApiJob(
                     id=job_id,
+                    workspace_id="ws-1",
                     owner_id=owner_id,
                     filename=f"{job_id}.png",
                     media_kind="image",
@@ -96,6 +107,7 @@ def scheduling_api(tmp_path):
     application = create_app(
         api_settings=cfg,
         runtime=SimpleNamespace(store=runtime_store),
+        storage=LocalStorage(Path(tmp_path)),
         engine=engine,
         session_factory=sessions,
     )

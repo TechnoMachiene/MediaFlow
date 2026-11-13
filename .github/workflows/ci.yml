@@ -29,4 +29,20 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22", cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
       - run: npm run build
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: One-command demo comes up from a clean checkout
+        run: docker compose -f compose.demo.yaml up -d --build --wait --wait-timeout 300
+      - name: Full demo workflow works without a Gemini key
+        run: python3 scripts/demo_check.py http://localhost:8081
+      - name: Demo mode refuses to run next to a real key
+        run: |
+          if docker run --rm -e DEMO_MODE=1 -e GEMINI_API_KEY=not-a-real-key mediaflow:latest \
+              python -m app.cli stats; then echo "guard did not fire"; exit 1; fi
+      - if: failure()
+        run: docker compose -f compose.demo.yaml logs

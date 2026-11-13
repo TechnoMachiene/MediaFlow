@@ -2,6 +2,7 @@ import type { Job, Page } from './types';
 
 const BASE = '/api/v1';
 const KEY = 'mediaflow.token';
+const WORKSPACE_KEY = 'mediaflow.workspace';
 
 export class ApiError extends Error {
   constructor(
@@ -12,34 +13,56 @@ export class ApiError extends Error {
   }
 }
 
-function stored(): string | null {
+function stored(key: string): string | null {
   try {
-    return sessionStorage.getItem(KEY);
+    return sessionStorage.getItem(key);
   } catch {
     return null;
   }
 }
 
-let token = stored();
+function store(key: string, value: string | null) {
+  try {
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    /* storage unavailable: the value lives for this page only */
+  }
+}
+
+let token = stored(KEY);
+let workspace = stored(WORKSPACE_KEY);
 let unauthorized: () => void = () => {};
 
 export const auth = {
   get token() {
     return token;
   },
+  /** The workspace every request acts in; null lets the server pick your first one. */
+  get workspace() {
+    return workspace;
+  },
   set(value: string | null) {
     token = value;
-    try {
-      if (value) sessionStorage.setItem(KEY, value);
-      else sessionStorage.removeItem(KEY);
-    } catch {
-      /* storage unavailable: the token lives for this page only */
-    }
+    store(KEY, value);
+    if (!value) auth.setWorkspace(null); // the next person to sign in may not share it
+  },
+  setWorkspace(id: string | null) {
+    workspace = id;
+    store(WORKSPACE_KEY, id);
   },
   onUnauthorized(fn: () => void) {
     unauthorized = fn;
   },
 };
+
+/** Auth and tenant headers for every API call. */
+export function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (workspace) headers['X-Workspace-Id'] = workspace;
+  return headers;
+}
 
 const OFFLINE = "Can't reach the server. Check your connection and try again.";
 
@@ -59,8 +82,7 @@ function expire() {
 }
 
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const headers = authHeaders();
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res: Response;
   try {
@@ -75,7 +97,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   if (res.status === 204) return undefined as T;
   const data: unknown = await res.json().catch(() => null);
   if (!res.ok) {
-    if (res.status === 401 && path !== '/auth/login') expire();
+    if (res.status === 401 && !path.startsWith('/auth/login')) expire();
     throw new ApiError(res.status, describe(data, res.status));
   }
   return data as T;
@@ -100,10 +122,9 @@ const media = new Map<string, Promise<string>>();
 export function mediaUrl(jobId: string): Promise<string> {
   let hit = media.get(jobId);
   if (!hit) {
-    hit = fetch(`${BASE}/jobs/${jobId}/media`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    }).then(async (res) => {
+    hit = fetch(`${BASE}/jobs/${jobId}/media`, { headers: authHeaders() }).then(async (res) => {
       if (res.status === 401) expire();
+      if (res.status === 410) throw new ApiError(410, 'Original removed by the retention policy');
       if (!res.ok) throw new ApiError(res.status, 'Media unavailable');
       return URL.createObjectURL(await res.blob());
     });
@@ -132,7 +153,7 @@ export function uploadFile(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE}/jobs`);
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    for (const [name, value] of Object.entries(authHeaders())) xhr.setRequestHeader(name, value);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.upload.onload = onSent;
     xhr.onerror = () => reject(new ApiError(0, OFFLINE));

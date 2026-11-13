@@ -1,0 +1,99 @@
+# MediaFlow: PostgreSQL + Redis + migrations + API (serves the web app) + queue worker.
+#
+#   docker compose up -d --build                 # real mode: needs GEMINI_API_KEY etc. in .env
+#   docker compose run --rm api python -m app.api.admin you@example.com
+#   open http://localhost:8080
+#
+# Values are read from .env (Compose interpolation) - see .env.example. Only the API port is
+# published; PostgreSQL and Redis stay on the private Compose network.
+
+x-app: &app
+  build: .
+  image: mediaflow:latest
+  restart: unless-stopped
+  environment: &app-env
+    DATABASE_URL: postgresql+psycopg://mediaflow:${POSTGRES_PASSWORD:-mediaflow}@postgres:5432/mediaflow
+    REDIS_URL: redis://redis:6379/0
+    QUEUE_PREFIX: ${QUEUE_PREFIX:-ma}
+    JWT_SECRET: ${JWT_SECRET:-}
+    ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
+    GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    GEMINI_MODEL: ${GEMINI_MODEL:-}
+    GEMINI_RPM: ${GEMINI_RPM:-}
+    GEMINI_RPD: ${GEMINI_RPD:-}
+    GEMINI_BURST: ${GEMINI_BURST:-1}
+    MEDIA_STORAGE: ${MEDIA_STORAGE:-local}
+    MEDIA_STORAGE_DIR: /app/uploads
+    S3_BUCKET: ${S3_BUCKET:-}
+    S3_PREFIX: ${S3_PREFIX:-}
+    S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+    S3_REGION: ${S3_REGION:-}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-30}
+    ALLOW_SIGNUP: ${ALLOW_SIGNUP:-0}
+    EMBEDDED_WORKER: "0"
+    DEMO_MODE: ${DEMO_MODE:-0}
+  volumes:
+    - uploads:/app/uploads
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mediaflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mediaflow}
+      POSTGRES_DB: mediaflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediaflow -d mediaflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    # Append-only file: queue state survives a container restart.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    <<: *app
+    ports:
+      - "${MEDIAFLOW_PORT:-8080}:8000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.cli", "worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.cli", "stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:

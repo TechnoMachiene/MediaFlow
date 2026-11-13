@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,15 +14,19 @@ from sqlalchemy import select, text
 from app.api.config import ApiSettings
 from app.api.database import (
     ApiJob,
+    Base,
     ScheduledPost,
     User,
+    Workspace,
     create_database,
 )
 from app.api.routes import router
+from app.api.worker_setup import configure_worker
 from app.config import Settings
 from app.wiring import Runtime, build_runtime
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+log = logging.getLogger("api")
 
 
 def create_app(
@@ -29,6 +36,7 @@ def create_app(
     runtime: Runtime | None = None,
     engine=None,
     session_factory=None,
+    storage=None,
     frontend_dir: Path | None = FRONTEND_DIST,
 ) -> FastAPI:
     @asynccontextmanager
@@ -40,15 +48,37 @@ def create_app(
         db_sessions = session_factory
         if db_engine is None or db_sessions is None:
             db_engine, db_sessions = create_database(cfg.database_url)
+        if cfg.demo_mode:
+            if cfg.database_url.startswith("sqlite"):
+                Base.metadata.create_all(db_engine)  # zero-setup demo database
+            from app.demo import demo_banner, seed
+
+            seed(db_sessions)
+            print(demo_banner(), file=sys.stderr, flush=True)
         app.state.api_settings = cfg
         app.state.runtime = rt
         app.state.engine = db_engine
         app.state.session_factory = db_sessions
+        app.state.storage = storage or cfg.build_storage()
         app.state.owns_runtime = runtime is None
         app.state.owns_engine = engine is None
+
+        stop, worker_thread = threading.Event(), None
+        if cfg.embedded_worker:
+            configure_worker(
+                rt, db_sessions, app.state.storage, retention_days=cfg.media_retention_days
+            )
+            worker_thread = threading.Thread(
+                target=rt.worker.run, args=(stop,), name="embedded-worker", daemon=True
+            )
+            worker_thread.start()
+            log.info("embedded queue worker started (EMBEDDED_WORKER=1)")
         try:
             yield
         finally:
+            stop.set()
+            if worker_thread is not None:
+                worker_thread.join(timeout=10)
             if app.state.owns_runtime:
                 rt.r.close()
             if app.state.owns_engine:
@@ -76,6 +106,7 @@ def create_app(
                 session.execute(select(User.id).limit(0))
                 session.execute(select(ApiJob.id).limit(0))
                 session.execute(select(ScheduledPost.id).limit(0))
+                session.execute(select(Workspace.id).limit(0))
             request.app.state.runtime.r.ping()
         except Exception:
             raise HTTPException(

@@ -37,6 +37,56 @@ class UserView(BaseModel):
     created_at: datetime
 
 
+class WorkspaceView(BaseModel):
+    id: str
+    name: str
+    role: Role
+
+
+class MeView(UserView):
+    """The caller, as seen from the workspace this request resolved to."""
+
+    workspace: WorkspaceView
+    workspaces: list[WorkspaceView]
+    platform_admin: bool = False
+
+
+class WorkspaceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Workspace name cannot be blank")
+        return value
+
+
+class SignupRequest(Credentials):
+    workspace_name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("workspace_name")
+    @classmethod
+    def strip_workspace(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Workspace name cannot be blank")
+        return value
+
+
+class DemoAccount(BaseModel):
+    email: str
+    role: Role
+
+
+class MetaResponse(BaseModel):
+    demo_mode: bool
+    allow_signup: bool
+    demo_password: str | None = None
+    demo_accounts: list[DemoAccount] = []
+
+
 class UserPage(BaseModel):
     items: list[UserView]
     limit: int
@@ -105,12 +155,26 @@ class JobPage(BaseModel):
     offset: int
 
 
-class StatsResponse(BaseModel):
+class FleetStats(BaseModel):
+    """Installation-wide Redis queue depths. Only platform admins see these."""
+
     ready: int
     processing: int
     deferred: int
     dead: int
-    gemini_calls_today: int
+
+
+class StatsResponse(BaseModel):
+    """Counts for the caller's workspace, from the durable job table."""
+
+    ready: int = Field(description="Queued or waiting on identical media")
+    processing: int
+    deferred: int = Field(description="Backing off before a retry")
+    dead: int = Field(description="Failed or out of retries")
+    gemini_calls_today: int | None = Field(
+        default=None, description="Installation-wide; only for platform admins"
+    )
+    fleet: FleetStats | None = None
 
 
 class SchedulePostRequest(BaseModel):

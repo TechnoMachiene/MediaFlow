@@ -34,6 +34,25 @@ local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
 return redis.call('ZADD', KEYS[1], 'XX', 'CH', now + tonumber(ARGV[2]), ARGV[1])
 """
 
+# One atomic snapshot: a job moving between structures can never be missed (or double-seen).
+LOCATE_LUA = """
+if redis.call('LPOS', KEYS[1], ARGV[1]) then return 'ready' end
+if redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 'processing' end
+if redis.call('ZSCORE', KEYS[3], ARGV[1]) then return 'deferred' end
+if redis.call('LPOS', KEYS[4], ARGV[1]) then return 'dead' end
+return false
+"""
+
+# Re-push only if the id is still nowhere, so two reconcilers cannot enqueue it twice.
+REQUEUE_LUA = """
+if redis.call('LPOS', KEYS[1], ARGV[1]) or redis.call('ZSCORE', KEYS[2], ARGV[1])
+   or redis.call('ZSCORE', KEYS[3], ARGV[1]) or redis.call('LPOS', KEYS[4], ARGV[1]) then
+  return 0
+end
+redis.call('LPUSH', KEYS[1], ARGV[1])
+return 1
+"""
+
 
 class ReliableQueue:
     def __init__(self, r: redis.Redis, prefix: str = "ma", lease_s: int = 900):
@@ -46,6 +65,8 @@ class ReliableQueue:
         self._claim = r.register_script(CLAIM_LUA)
         self._reap = r.register_script(REAP_LUA)
         self._extend = r.register_script(EXTEND_LUA)
+        self._locate = r.register_script(LOCATE_LUA)
+        self._requeue = r.register_script(REQUEUE_LUA)
         self._promoter = DelayQueue(r, delayed=self.deferred, ready=self.ready)
 
     # producer
@@ -86,6 +107,19 @@ class ReliableQueue:
 
     def promote_deferred(self, batch: int = 100) -> int:
         return self._promoter.promote_due(batch)
+
+    def _all(self) -> list[str]:
+        return [self.ready, self.processing, self.deferred, self.dead]
+
+    def locate(self, job_id: str) -> str | None:
+        """Which structure holds the id right now: ready | processing | deferred | dead | None."""
+        out = self._locate(keys=self._all(), args=[job_id])
+        if not out:
+            return None
+        return out.decode() if isinstance(out, bytes) else out
+
+    def requeue_if_lost(self, job_id: str) -> bool:
+        return bool(self._requeue(keys=self._all(), args=[job_id]))
 
     def depths(self) -> dict[str, int]:
         return {

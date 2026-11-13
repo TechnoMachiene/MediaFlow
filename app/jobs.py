@@ -20,6 +20,11 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
   return 'cached'
 end
 local won = redis.call('SET', KEYS[2], ARGV[1], 'NX', 'EX', tonumber(ARGV[2]))
+if not won and redis.call('GET', KEYS[2]) == ARGV[1] then
+  -- re-submitting the in-flight leader itself (recovery after Redis lost its job hash)
+  redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+  won = true
+end
 if won then
   redis.call('HSET', KEYS[3], 'status', 'queued', 'updated_at', ARGV[3])
   redis.call('LPUSH', KEYS[4], ARGV[1])
@@ -113,6 +118,9 @@ class JobStore:
     def _inflight(self, ck: str) -> str:
         return f"{self.p}:inflight:{ck}"
 
+    def _submitted(self, jid: str) -> str:
+        return f"{self.p}:submitted:{jid}"
+
     # ---- producer
     def submit(
         self,
@@ -121,13 +129,57 @@ class JobStore:
         prompt: str = SYSTEM_PROMPT,
         *,
         job_id: str | None = None,
+        scope: str = "",
     ) -> dict:
         """Validate -> hash original bytes -> dedup -> enqueue. Returns {job_id, status, cache_key}.
         status: queued (you will call Gemini) | waiting (same upload in flight) | done (cached)."""
         info = inspect_media(path, max_image_mb=self.max_image_mb, max_video_mb=self.max_video_mb)
-        sha = sha256_file(path)
-        ck = make_cache_key(sha, prompt, self.model)
+        return self.submit_prepared(
+            user_id,
+            media_ref=info.path,
+            kind=info.kind,
+            mime=info.mime,
+            sha256=sha256_file(path),
+            prompt=prompt,
+            job_id=job_id,
+            scope=scope,
+        )
+
+    def submit_prepared(
+        self,
+        user_id: str | int,
+        *,
+        media_ref: str,
+        kind: str,
+        mime: str,
+        sha256: str,
+        prompt: str = SYSTEM_PROMPT,
+        job_id: str | None = None,
+        scope: str = "",
+        force: bool = False,
+    ) -> dict:
+        """Enqueue media that the caller already validated and hashed.
+
+        `media_ref` is what the worker receives (a path or an s3:// ref). `scope` partitions
+        dedup and the result cache, so identical uploads in different workspaces never share
+        a Gemini call or reveal each other ("cached": true). Re-submitting the same `job_id`
+        is a no-op that returns the job's current status, which makes dispatch safe to retry;
+        `force=True` is for recovering a job whose Redis records were lost."""
+        ck = make_cache_key(sha256, prompt, self.model)
+        if scope:
+            ck = f"{scope}:{ck}"
         jid = job_id or uuid.uuid4().hex
+        if not self.r.set(self._submitted(jid), "1", nx=True, ex=self.job_ttl_s) and not force:
+            current = self.status(jid)
+            return {
+                "job_id": jid,
+                "status": current["status"],
+                "cache_key": ck,
+                "cached": current["cached"],
+                "duplicate": True,
+            }
+        if force:
+            self.r.set(self._submitted(jid), "1", ex=self.job_ttl_s)
         now = f"{time.time():.3f}"
         # job hash must exist BEFORE its id can reach the ready list
         pipe = self.r.pipeline(transaction=True)
@@ -135,13 +187,13 @@ class JobStore:
             self._job(jid),
             mapping={
                 "user_id": str(user_id),
-                "path": info.path,
-                "kind": info.kind,
-                "mime": info.mime,
+                "path": media_ref,
+                "kind": kind,
+                "mime": mime,
                 "prompt": prompt,
                 "prompt_hash": prompt_hash(prompt),
                 "model": self.model,
-                "sha256": sha,
+                "sha256": sha256,
                 "cache_key": ck,
                 "status": "new",
                 "attempts": 0,

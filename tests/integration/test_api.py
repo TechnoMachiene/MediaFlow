@@ -16,9 +16,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.config import ApiSettings
-from app.api.database import ApiJob, Base, User
+from app.api.database import ApiJob, Base, User, Workspace, WorkspaceMember
 from app.api.main import create_app
-from app.api.persistence import persist_api_result
+from app.api.persistence import attach
 from app.api.security import hash_password
 from app.errors import Permanent
 from tests.helpers import ScriptedClient
@@ -43,7 +43,7 @@ def api_client(make_rt, tmp_path, monkeypatch):
     )
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    runtime.worker.on_result = lambda job_id, result: persist_api_result(sessions, job_id, result)
+    attach(runtime.worker, sessions)
     cfg = ApiSettings(
         database_url="postgresql+psycopg://unused",
         jwt_secret="test-secret-" + "x" * 40,
@@ -61,13 +61,29 @@ def api_client(make_rt, tmp_path, monkeypatch):
     engine.dispose()
 
 
-def create_account(client: TestClient, email, role="user"):
+TEST_WORKSPACE = "test-workspace"
+
+
+def create_account(client: TestClient, email, role="user", workspace_id=TEST_WORKSPACE):
+    """An account that is a member of `workspace_id` (created on first use) with `role`.
+    Admin-ish roles are also platform admins, as the admin CLI would make them."""
     with client.app.state.session_factory.begin() as db:
+        if db.get(Workspace, workspace_id) is None:
+            db.add(Workspace(id=workspace_id, name=workspace_id))
         user = User(
-            email=email, password_hash=hash_password("a-very-long-test-password"), role=role
+            email=email,
+            password_hash=hash_password("a-very-long-test-password"),
+            role=role if role in ("admin", "super_admin") else "user",
         )
         db.add(user)
         db.flush()
+        db.add(
+            WorkspaceMember(
+                workspace_id=workspace_id,
+                user_id=user.id,
+                role="admin" if role == "super_admin" else role,
+            )
+        )
         user_id = user.id
     response = client.post(
         "/api/v1/auth/login",

@@ -1,8 +1,99 @@
 # MediaFlow — AI Media Analysis & Content Calendar
 
-MediaFlow is a self-hosted app (FastAPI backend plus a React web app) for uploading images and videos, generating social-media
-content drafts with Google Gemini, reviewing jobs with role-based accounts, and planning approved
-posts on a timezone-aware calendar.
+MediaFlow is a multi-tenant app (FastAPI backend plus a React web app) for uploading images and
+videos, generating social-media content drafts with Google Gemini, reviewing jobs with
+role-based workspaces, and planning approved posts on a timezone-aware calendar.
+
+## Try the demo: one command, no Gemini key
+
+All you need is Docker. No `.env`, no API key, no other setup:
+
+```bash
+git clone <this repo> && cd media_queue
+docker compose -f compose.demo.yaml up --build
+```
+
+Open **<http://localhost:8081>** when the log prints the `MediaFlow DEMO MODE` banner. The
+first build takes a few minutes; after that, startup takes about half a minute.
+
+| Sign in as | Email | Password | Can |
+|---|---|---|---|
+| Admin | `demo-admin@example.com` | `demo-password-123` | Everything, including Team and Activity |
+| Manager | `demo-manager@example.com` | `demo-password-123` | Upload, review (approve/reject), add people |
+| Member | `demo-member@example.com` | `demo-password-123` | Upload and schedule their own approved drafts |
+
+The sign-in page also has one-click **Continue as …** buttons for each of these.
+
+**Walk through the whole workflow (about 2 minutes):**
+
+1. **Continue as Member** and upload any photo in **Library**. Within a few seconds it shows
+   **In review**, with Instagram, TikTok and Facebook drafts written from the photo's real
+   colours and shape.
+2. Sign out, **Continue as Manager**, open **Review**, and approve the draft.
+3. Sign out, **Continue as Member**, open the draft, and schedule it for a future date.
+4. Open **Calendar** to see it planned.
+
+Shortcut: the Admin can do all four steps in one account. To check the same workflow from a
+terminal, run `python3 scripts/demo_check.py` (it needs only Python).
+
+Stop with `Ctrl+C`. Run it in the background with `docker compose -f compose.demo.yaml up -d
+--build --wait` (or `make docker-demo`). Delete it and all its data with
+`docker compose -f compose.demo.yaml down --volumes` (`make docker-demo-down`). To use another
+port, set `MEDIAFLOW_DEMO_PORT=9000`.
+
+Without Docker, with Redis and Node.js installed, run `make demo` instead. It serves on
+<http://localhost:8082> and uses SQLite and a worker inside the API process.
+
+### What the demo is, and isn't
+
+Drafts come from a scripted stand-in (`app/demo.py`), not Gemini. They are deterministic
+templates filled with facts read from the image, and a banner on every page says so.
+Everything else is the real system: PostgreSQL, the Redis queue, a separate worker process,
+workspaces and roles, review and calendar.
+
+The scripted provider is confined to local and demo use, and the code enforces that:
+
+- It is built only when `DEMO_MODE=1` (`build_client` in `app/gemini_client.py`).
+- `DEMO_MODE=1` **refuses to start if `GEMINI_API_KEY` is set**, so a demo can't run inside a
+  deployment that has real credentials.
+- `DEMO_MODE=1` **requires a Redis prefix starting with `demo`**, so a demo worker can never
+  take jobs from, or write simulated drafts into, the real queue (`ma`).
+- Demo accounts, with their published password, are **only seeded into an empty database**
+  (or one the demo created), never into one that holds real users.
+- `compose.demo.yaml` is self-contained and reads nothing from `.env`, so real settings can't
+  leak in. It runs as its own Compose project with its own volumes.
+
+Tests for each guard are in `tests/integration/test_demo_mode.py`. Never set `DEMO_MODE=1` on
+a real deployment.
+
+## Run with Docker
+
+`compose.yaml` runs the whole system: PostgreSQL 17, Redis 8 (append-only, so the queue
+survives restarts), a one-shot `migrate` step, the API (which also serves the web app) and a
+separate queue worker. API and worker are the same image; the worker also runs the DB↔Redis
+reconciler and media retention. Only the API is published, on **port 8080**; PostgreSQL and
+Redis stay on the private Compose network, so they never clash with local installs.
+
+```bash
+cp -n .env.example .env              # set GEMINI_API_KEY, GEMINI_MODEL, JWT_SECRET (openssl rand -hex 32)
+make docker-up                       # build, migrate, start, wait until healthy
+make docker-admin EMAIL=you@example.com   # create the first admin (prompts for a password)
+open http://localhost:8080
+```
+
+| Task | Command |
+|---|---|
+| Logs | `make docker-logs` |
+| More workers | `docker compose up -d --scale worker=3` (they share the rate limiter) |
+| Stop (keeps data) | `make docker-down` |
+| One repair sweep | `docker compose exec worker python -m app.cli reconcile` |
+| Change the port | `MEDIAFLOW_PORT=9000` in `.env` |
+
+Compose reads `.env` only to fill in variables. `DATABASE_URL` and `REDIS_URL` are set by
+Compose to point at its own containers, and `.env` is never copied into the image. Set
+`POSTGRES_PASSWORD` in `.env` before the first start; it defaults to `mediaflow`, which is
+acceptable only because PostgreSQL is not published. Originals live in the `uploads` volume;
+for several hosts, use `MEDIA_STORAGE=s3` instead.
 
 > **Current scope:** This project analyzes media and creates content suggestions. It does not
 > connect to Instagram, Facebook, or TikTok, and it does not automatically publish posts. The
@@ -15,29 +106,38 @@ posts on a timezone-aware calendar.
 - Uses Gemini to analyze the media and draft platform-tailored captions and content suggestions.
 - Processes work asynchronously through a Redis queue, with status checks and retries.
 - Deduplicates identical media/model/prompt jobs to avoid repeated Gemini calls where possible.
-- Stores user/job records and durable completed results in PostgreSQL.
-- Supports users, managers, admins, and a protected super-admin account.
+- Stores user/job records and durable completed results in PostgreSQL, and keeps PostgreSQL and
+  Redis consistent through every crash point
+  (see [docs/JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md)).
+- Isolates tenants in **workspaces**. Every job, post and permission belongs to one workspace,
+  people can belong to several with a different role in each, and dedup never crosses tenants.
+- Supports members, managers and admins per workspace, platform admins, and a protected
+  super-admin account.
+- Stores originals on local disk or any S3-compatible bucket, and applies a media retention
+  policy (originals deleted after 30 idle days by default; drafts kept).
 - Lets managers/admins review completed work and approve or reject it.
 - Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
 - Stores schedule instants in UTC and displays them in the requested IANA timezone.
 - Ships a responsive web app (`frontend/`) covering upload, review, calendar, team, and queue
   activity.
 - Includes automated unit and integration tests that use synthetic media and a scripted Gemini
-  client; live Gemini tests are separate.
+  client, plus a Vitest + Testing Library suite for the web app; live Gemini tests are separate.
+- Runs in a zero-setup demo mode with an offline draft writer.
 
 ## What it does not do
 
 - It does not connect social accounts, send posts to platform APIs, or publish automatically when
   a calendar date arrives.
 - It does not provide in-app notifications for review results or scheduled dates.
-- It does not run in a demo mode: real job processing requires valid Gemini credentials. Automated
-  tests use a test-only scripted client instead.
+- It does not offer invitations, billing or per-workspace quotas yet. A workspace admin creates
+  accounts directly, and the Gemini rate limit is shared by the whole installation.
+- Demo drafts are deterministic templates, not real media understanding.
 
 ## Workflow
 
 ```text
-upload -> validate -> hash and deduplicate -> Redis queue -> worker -> Gemini
-                                                         -> persist result
+upload -> validate -> store original -> job row (PostgreSQL outbox) -> Redis queue -> worker
+       -> Gemini -> result in Redis + PostgreSQL          (reconciler repairs any gap)
 completed job -> manager review -> approved -> owner schedules -> calendar
 ```
 
@@ -55,7 +155,8 @@ results; they are not sent to social platforms.
 - Google Gemini for media analysis and draft generation
 - Pillow for image inspection and resizing
 - FFmpeg for compressing larger videos
-- Pytest and Ruff for testing and linting
+- Local disk or S3-compatible object storage (boto3) for originals
+- Pytest, Ruff, Vitest and Testing Library for testing and linting
 
 ## Quick setup on Ubuntu or WSL
 
@@ -181,9 +282,15 @@ alembic upgrade head
 python -m app.api.admin abdullahtauseef988@gmail.com
 ```
 
-The admin command prompts for a password securely. The designated email is protected as the
+The admin command prompts for a password securely. It makes the account a platform admin and an
+admin of the oldest workspace; on a fresh install it creates a "Default workspace". Pass
+`--workspace NAME` to choose or create another. The designated email is protected as the
 super-admin account. Running the command again for an existing account resets its password and
 revokes its existing tokens.
+
+Upgrading from a release without workspaces: `alembic upgrade head` moves all existing users,
+jobs and posts into "Default workspace", and each user's old global role becomes their role
+there.
 
 ### 3. Start the API and worker
 
@@ -201,10 +308,15 @@ source .venv/bin/activate
 python -m app.cli worker
 ```
 
-The API and worker must use the same Redis queue, PostgreSQL database, and persistent
-`MEDIA_STORAGE_DIR`. FFmpeg is needed on worker machines to compress videos that exceed the
-Gemini processing size limit. Uploaded originals are retained in media storage; set and enforce a
-retention policy appropriate for your deployment.
+The API and worker must use the same Redis queue, PostgreSQL database and media storage: either
+a shared `MEDIA_STORAGE_DIR`, or the same S3 bucket with `MEDIA_STORAGE=s3`, which needs no
+shared disk. FFmpeg is needed on worker machines to compress videos that exceed the Gemini
+processing size limit.
+
+Nothing reaches Gemini until a worker runs, so the upload stays `queued`. For local
+development you can skip Terminal 2 with `EMBEDDED_WORKER=1`, which runs a worker inside the API
+process. Each worker also runs the DB↔Redis reconciler every 30 seconds and the media retention
+pruner every hour.
 
 Interactive API documentation: <http://127.0.0.1:8000/docs>
 
@@ -227,7 +339,9 @@ terminal. It serves <http://127.0.0.1:5173> and proxies `/api` and `/health` to 
 make web-dev
 ```
 
-Sign in with an account created by the admin command above. What each role sees:
+Sign in with an account created by the admin command above. Roles are per workspace; if you
+belong to several workspaces, a switcher appears in the sidebar (or the account sheet on phones).
+What each role sees:
 
 | Screen | Who | What it does |
 |---|---|---|
@@ -235,7 +349,7 @@ Sign in with an account created by the admin command above. What each role sees:
 | Review | Manager/admin | Approve or reject finished drafts; browse approved and rejected ones. |
 | Calendar | Everyone | Month view of planned posts in any timezone; reschedule or cancel. |
 | Team | Manager/admin | Add people; admins can also edit roles, reset passwords, and remove accounts. |
-| Activity | Admin | Queue depths, Gemini calls today, service health, and every job. |
+| Activity | Admin | This workspace's job counts, service health, and every job. Platform admins also see Gemini calls today. |
 
 The access token is kept in the browser's session storage and expires after
 `ACCESS_TOKEN_TTL_MINUTES`; the app then asks you to sign in again.
@@ -243,23 +357,32 @@ The access token is kept in the browser's session storage and expires after
 ## API reference
 
 All application endpoints below use the `/api/v1` prefix unless noted otherwise. Authenticated
-endpoints expect `Authorization: Bearer <access_token>`.
+endpoints expect `Authorization: Bearer <access_token>`. Workspace-scoped endpoints act in the
+workspace named by the optional `X-Workspace-Id` header, or the caller's oldest workspace when it
+is absent. A caller who is not a member gets `403`. "Manager" and "admin" below mean the
+caller's role in that workspace, and records from other workspaces always answer `404`.
 
 ### Authentication and account management
 
 | Method and path | Access | Purpose |
 |---|---|---|
+| `GET /meta` | Public | Whether demo mode and sign-up are on (and demo accounts in demo mode). |
 | `POST /auth/login` | Public | Log in and receive a bearer token. |
-| `GET /auth/me` | Authenticated | Return the caller's own account (id, email, role). |
-| `POST /users` | Manager/admin | Create a user or manager; admins can also create admins. |
-| `GET /users`, `GET /users/{user_id}` | Admin | List users or get one user. |
-| `PATCH /users/{user_id}` | Admin | Update supported account fields. |
-| `PATCH /users/{user_id}/role` | Admin | Change a user's role. |
-| `DELETE /users/{user_id}` | Admin | Delete a user, subject to active-job safeguards. |
+| `POST /auth/signup` | Public, if `ALLOW_SIGNUP=1` | Create an account plus a new workspace it administers. |
+| `GET /auth/me` | Authenticated | The caller, their role in the current workspace, and all their workspaces. |
+| `GET /workspaces` | Authenticated | The caller's workspaces and role in each. |
+| `POST /workspaces` | Platform admin, or anyone if sign-up is open | Create a workspace; the creator becomes its admin. |
+| `POST /users` | Manager/admin | Create an account in this workspace; admins can also create admins. |
+| `GET /users`, `GET /users/{user_id}` | Admin | List or get members of this workspace. |
+| `PATCH /users/{user_id}` | Admin | Update role, email or password. |
+| `PATCH /users/{user_id}/role` | Admin | Change a member's role in this workspace. |
+| `DELETE /users/{user_id}` | Admin | Remove a member and their jobs here; the account is deleted if it is in no other workspace. |
 
-Managers can create users and managers, but cannot create admins. Admins can manage accounts;
-the protected super-admin account cannot be modified or deleted through the API. Account creation
-is restricted to authorized managers/admins—there is no public registration endpoint.
+Managers can create users and managers, but cannot create admins. A workspace always keeps at
+least one admin. An admin can change a member's email or password only if that account belongs
+to no other workspace, so one tenant can never take over a person shared with another. The
+protected super-admin account cannot be modified or deleted through the API. Without
+`ALLOW_SIGNUP=1`, only managers and admins can create accounts.
 
 ### Media jobs and review
 
@@ -269,13 +392,13 @@ is restricted to authorized managers/admins—there is no public registration en
 | `GET /jobs/mine` | Authenticated | List the caller's jobs with processing and approval statuses; supports `limit` and `offset`. |
 | `GET /jobs/{job_id}` | Owner/manager/admin | Get a job's current status and result; non-admins can access their own jobs. |
 | `DELETE /jobs/{job_id}` | Owner/manager/admin | Cancel an owned job when it has not started processing. |
-| `GET /jobs/{job_id}/media` | Owner/manager/admin | Download the protected original upload. |
+| `GET /jobs/{job_id}/media` | Owner/manager/admin | Download the protected original upload; `410` once retention deleted it. |
 | `GET /jobs/review` | Manager/admin | List completed jobs awaiting review. |
 | `GET /jobs/approved` | Manager/admin | List completed, approved jobs. |
 | `GET /jobs/rejected` | Manager/admin | List completed, rejected jobs. |
 | `PATCH /jobs/{job_id}/approval` | Manager/admin | Approve or reject a completed job. |
 | `GET /jobs` | Admin | Search/list jobs, with pagination and optional media-kind filter. |
-| `GET /stats` | Admin | Read queue depths and today's Gemini call count. |
+| `GET /stats` | Admin | This workspace's job counts; platform admins also get installation-wide queue depths and Gemini calls today. |
 
 Review items include the submitter's email and protected media URL. Once a job is approved or
 rejected, it no longer appears in the pending review list. Upload responses include the result
@@ -331,6 +454,26 @@ Queue/analysis statuses commonly include:
 Approval is tracked separately: `pending`, `approved`, or `rejected`. Only jobs with analysis status
 `done` and approval status `approved` can be scheduled.
 
+PostgreSQL and Redis are kept in agreement without a shared transaction. The job row is an
+outbox committed before Redis hears of the job, the worker writes status and results back, and
+a reconciler repairs every divergence: an API crash before dispatch, a DB outage mid-result, a
+Redis flush or lost queue entry, or a crashed worker. [docs/JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md)
+has the sequence diagram, the full failure matrix and the test that covers each row. Run a
+repair sweep by hand with `make reconcile`.
+
+## Media storage and retention
+
+| Setting | Effect |
+|---|---|
+| `MEDIA_STORAGE=local` (default) | Originals in `MEDIA_STORAGE_DIR`; API and workers must share it. |
+| `MEDIA_STORAGE=s3` + `S3_BUCKET` | Originals in any S3-compatible bucket (AWS, R2, MinIO via `S3_ENDPOINT_URL`). Workers download a temporary copy per job. |
+| `MEDIA_RETENTION_DAYS=30` (default) | Delete an original once nobody has uploaded those bytes for 30 days, no job using it is active, and no upcoming scheduled post uses it. `0` keeps originals forever. |
+
+Retention deletes originals only. Drafts, approvals and calendar entries are kept, and the
+media URL answers `410 Gone`. Uploading the same file again restores it. Workers apply the
+policy hourly; run it once with `make prune-media`. Abandoned partial uploads more than a day
+old are removed too.
+
 ## Configuration
 
 See [.env.example](./.env.example). Common settings:
@@ -339,11 +482,16 @@ See [.env.example](./.env.example). Common settings:
 |---|---|
 | `REDIS_URL` | Redis connection used by the queue and limiter. |
 | `QUEUE_PREFIX` | Namespace for this application's Redis keys. |
-| `DATABASE_URL` | PostgreSQL SQLAlchemy connection string. |
+| `DATABASE_URL` | PostgreSQL SQLAlchemy connection string (SQLite only in demo mode). |
 | `JWT_SECRET` | Secret used to sign access tokens; at least 32 bytes. |
 | `ACCESS_TOKEN_TTL_MINUTES` | JWT lifetime; defaults to 30 minutes. |
-| `MEDIA_STORAGE_DIR` | Persistent upload storage directory; defaults to `uploads`. |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Required Gemini credentials and model identifier. |
+| `MEDIA_STORAGE_DIR` | Persistent upload storage directory; defaults to `uploads`. Also the staging area for S3 uploads. |
+| `MEDIA_STORAGE`, `S3_BUCKET`, `S3_PREFIX`, `S3_ENDPOINT_URL`, `S3_REGION` | Where originals live: `local` or `s3`. |
+| `MEDIA_RETENTION_DAYS` | Days an unused original is kept; default 30, `0` keeps forever. |
+| `ALLOW_SIGNUP` | Self-serve sign-up that creates a workspace; default off. |
+| `EMBEDDED_WORKER` | Run a queue worker inside the API process; default off. |
+| `DEMO_MODE` | Offline drafts, SQLite, embedded worker and demo accounts; never in production. |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini credentials and model identifier (not needed in demo mode). |
 | `GEMINI_RPM`, `GEMINI_RPD`, `GEMINI_BURST` | Shared per-minute, daily, and burst call limits. |
 | `QUEUE_LEASE_S`, `QUEUE_MAX_ATTEMPTS` | Worker lease duration and retry limit. |
 | `MAX_IMAGE_MB`, `MAX_VIDEO_MB`, `MAX_VIDEO_UPLOAD_MB` | Media upload/processing limits. |
@@ -361,7 +509,13 @@ make unit          # unit tests
 make integration   # Redis-backed integration tests
 make cov           # all non-live tests plus coverage (85% minimum)
 make done          # lint, unit, integration, and coverage
+make web-test      # web app: Vitest + Testing Library (also run in CI)
 ```
+
+The web app tests (`frontend/src/**/*.test.ts(x)`) cover job-state and calendar logic, the API
+client (auth and workspace headers, 401 handling, error messages, pagination), sign-in, demo
+sign-in and sign-up, and switching workspaces. Run them in watch mode with
+`cd frontend && npm run test:watch`.
 
 Live tests are separate and may call Gemini:
 
@@ -378,7 +532,11 @@ clean up tests.
 | Path | Responsibility |
 |---|---|
 | `frontend/` | React web app; `npm run build` writes `frontend/dist`, which the API serves. |
-| `app/api/` | FastAPI routes, authentication, schemas, database models, and media storage. |
+| `app/api/` | FastAPI routes, authentication, workspaces, schemas, database models, and the media registry. |
+| `app/api/reconcile.py` | DB↔Redis reconciler and the shared job-dispatch step. |
+| `app/api/retention.py` | Media retention policy. |
+| `app/storage.py` | Local and S3-compatible media storage backends. |
+| `app/demo.py` | Demo-mode draft writer and demo account seeding. |
 | `app/cli.py` | Command-line job submission, status/stats, and worker entry point. |
 | `app/jobs.py` | Job records, submission, and deduplication. |
 | `app/redis_queue.py`, `app/delayqueue.py` | Reliable Redis queues, delayed retries, and recovery. |
@@ -388,12 +546,14 @@ clean up tests.
 | `app/media.py` | Media validation, hashing, image preparation, and video compression. |
 | `app/system_prompt.py` | Instructions for media analysis and content-draft generation. |
 | `migrations/` | Alembic schema history. |
+| `docs/JOB_LIFECYCLE.md` | Cross-store job lifecycle, failure matrix, guarantees. |
 | `tests/` | Unit, integration, and optional live tests. |
 
 ## Deployment notes
 
-This is a self-hosted starter backend, not a fully hardened public deployment. Put it behind
-HTTPS and a reverse proxy with request-size and authentication rate limits before exposing it
-publicly. Use strong secrets, secure PostgreSQL/Redis, persist the media directory, back up the
-database, and define a media-retention policy. Protect `.env` and any uploaded media as sensitive
-data.
+Not yet a fully hardened public deployment. Put it behind HTTPS and a reverse proxy with
+request-size and authentication rate limits before exposing it publicly, especially with
+`ALLOW_SIGNUP=1`, since every new workspace can spend your Gemini quota. Use strong secrets,
+secure PostgreSQL/Redis, run at least one `make worker` with `DATABASE_URL` set (it runs the
+reconciler and retention), persist the media directory or use S3, back up the database, and
+review `MEDIA_RETENTION_DAYS`. Protect `.env` and any uploaded media as sensitive data.

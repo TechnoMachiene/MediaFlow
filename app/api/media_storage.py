@@ -1,99 +1,96 @@
+"""Content-addressed media registry on top of a MediaStorage backend.
+
+Identical bytes are stored once (keyed by SHA-256), whoever uploads them. Each upload bumps
+`last_used_at` under a row lock; retention (app/api/retention.py) takes the same lock before it
+deletes anything, so an upload can never be paired with an original that is being purged.
+"""
+
 from __future__ import annotations
 
 import hashlib
-import os
-import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.database import ApiJob, MediaAsset
+from app.storage import LocalStorage, MediaStorage
 
 
-def _safe_filename(original_filename: str) -> str:
-    name = Path(original_filename).name
-    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name).strip(" .")
-    return name[:255] or "upload"
-
-
-def _same_content(path: Path, sha256: str) -> bool:
+def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
-    return digest.hexdigest() == sha256
-
-
-def _reserve_filename(directory: Path, original_filename: str, sha256: str) -> tuple[Path, bool]:
-    original = _safe_filename(original_filename)
-    stem, suffix = os.path.splitext(original)
-    max_stem = 255 - len(suffix) - 65
-    collision_stem = f"{stem[:max_stem]}-{sha256}"
-    candidates = [original, f"{stem[:max_stem]}-{sha256[:8]}{suffix}", f"{collision_stem}{suffix}"]
-    for candidate_name in candidates:
-        candidate = directory / candidate_name
-        try:
-            candidate.touch(exist_ok=False)
-            return candidate, True
-        except FileExistsError:
-            if _same_content(candidate, sha256):
-                return candidate, False
-    raise FileExistsError(f"Unable to reserve a unique media filename for {original!r}")
+    return digest.hexdigest()
 
 
 def store_media_asset(
     db: Session,
     staged_path: Path,
     original_filename: str,
-    storage_dir: Path,
-) -> str:
-    digest = hashlib.sha256()
-    with staged_path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    sha256 = digest.hexdigest()
+    storage: MediaStorage,
+) -> MediaAsset:
+    """Register `staged_path` and return its asset row. The staged file may be consumed."""
+    sha256 = _sha256(staged_path)
+    now = datetime.now(timezone.utc)
 
-    existing = db.get(MediaAsset, sha256)
-    if existing is not None:
-        staged_path.unlink()
-        return sha256
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.sha256 == sha256).with_for_update())
+    if asset is not None:
+        if asset.purged_at is not None or not storage.exists(asset.stored_filename):
+            # Retention deleted the original earlier (or the file went missing behind our
+            # back); these bytes are here again, so store them again.
+            asset.stored_filename = storage.save(staged_path, original_filename, sha256)
+            asset.purged_at = None
+        asset.last_used_at = now
+        db.commit()
+        return asset
 
-    target, created = _reserve_filename(storage_dir, original_filename, sha256)
-    if created:
-        os.replace(staged_path, target)
-    else:
-        staged_path.unlink()
-
-    asset = MediaAsset(sha256=sha256, stored_filename=target.name)
+    key = storage.save(staged_path, original_filename, sha256)
+    asset = MediaAsset(sha256=sha256, stored_filename=key, last_used_at=now)
     db.add(asset)
     try:
         db.commit()
     except IntegrityError:
+        # A concurrent upload of the same bytes registered first. Keep theirs.
         db.rollback()
-        existing = db.get(MediaAsset, sha256)
-        if existing is not None:
-            if target.name != existing.stored_filename and _same_content(target, sha256):
-                target.unlink()
-            return sha256
-        if created and target.exists():
-            target.unlink()
-        raise
+        existing = db.scalar(
+            select(MediaAsset).where(MediaAsset.sha256 == sha256).with_for_update()
+        )
+        if existing is None:
+            storage.delete(key)
+            raise
+        if existing.stored_filename != key:
+            storage.delete(key)
+        existing.last_used_at = now
+        db.commit()
+        return existing
     except Exception:
         db.rollback()
-        if created and target.exists():
-            target.unlink()
+        storage.delete(key)
         raise
-    return sha256
+    return asset
 
 
-def resolve_media_path(db: Session, job_id: str, original_filename: str, storage_dir: Path) -> Path:
-    job = db.get(ApiJob, job_id)
-    if job is not None and job.media_sha256 is not None:
+@dataclass(frozen=True)
+class MediaLocation:
+    key: str | None
+    purged: bool
+    storage_ref: str | None  # what a worker needs (path or s3:// ref)
+
+
+def locate_job_media(db: Session, job: ApiJob, storage: MediaStorage) -> MediaLocation:
+    if job.media_sha256 is not None:
         asset = db.get(MediaAsset, job.media_sha256)
         if asset is not None:
-            return storage_dir / asset.stored_filename
-
-    # Older uploads were stored by job ID; keep existing job media accessible.
-    suffix = Path(original_filename).suffix.lower()
-    return storage_dir / f"{job_id}{suffix}"
+            if asset.purged_at is not None:
+                return MediaLocation(asset.stored_filename, True, None)
+            return MediaLocation(asset.stored_filename, False, storage.ref(asset.stored_filename))
+    # Uploads from before content-addressed storage were saved under the job id.
+    if isinstance(storage, LocalStorage):
+        key = f"{job.id}{Path(job.filename).suffix.lower()}"
+        return MediaLocation(key, False, storage.ref(key))
+    return MediaLocation(None, False, None)

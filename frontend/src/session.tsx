@@ -1,9 +1,10 @@
 import { createContext, useContext } from 'react';
-import type { User } from './types';
+import type { Me } from './types';
 
 export interface Session {
-  user: User;
+  user: Me;
   signOut: () => void;
+  switchWorkspace: (id: string) => void;
 }
 
 export const SessionContext = createContext<Session | null>(null);

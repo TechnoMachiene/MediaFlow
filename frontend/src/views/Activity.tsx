@@ -19,7 +19,7 @@ const TILES: { key: keyof Stats; label: string; hint: string }[] = [
   { key: 'processing', label: 'Analyzing', hint: 'With a worker now' },
   { key: 'deferred', label: 'Retrying', hint: 'Backing off after an error' },
   { key: 'dead', label: 'Failed', hint: 'Out of retries' },
-  { key: 'gemini_calls_today', label: 'Gemini calls today', hint: 'Counts toward the daily quota' },
+  { key: 'gemini_calls_today', label: 'Gemini calls today', hint: 'All workspaces · daily quota' },
 ];
 
 type Health = 'checking' | 'ready' | 'down';
@@ -56,7 +56,7 @@ export function Activity() {
 
   return (
     <div className="page">
-      <PageHeader title="Activity" subtitle="Queue health and every job in the system">
+      <PageHeader title="Activity" subtitle={`Queue health and every job in ${user.workspace.name}`}>
         {health !== 'checking' && (
           <Badge tone={health === 'ready' ? 'green' : 'red'}>
             {health === 'ready' ? 'All systems ready' : 'Database or Redis unavailable'}
@@ -65,11 +65,11 @@ export function Activity() {
       </PageHeader>
       <div className="page-body">
         <dl className="stats">
-          {TILES.map((t) => (
+          {TILES.filter((t) => t.key !== 'gemini_calls_today' || stats?.gemini_calls_today != null).map((t) => (
             <div key={t.key} className="stat">
               <dt>{t.label}</dt>
               <dd className={t.key === 'dead' && stats?.dead ? 'stat-alert' : ''}>
-                {stats ? stats[t.key].toLocaleString() : '–'}
+                {stats ? (stats[t.key] ?? 0).toLocaleString() : '–'}
               </dd>
               <span>{t.hint}</span>
             </div>

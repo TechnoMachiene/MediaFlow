@@ -1,9 +1,12 @@
-"""Manual control. Needs .env with GEMINI_API_KEY and GEMINI_MODEL (real Gemini calls).
+"""Manual control. Needs .env with GEMINI_API_KEY and GEMINI_MODEL (real Gemini calls),
+or DEMO_MODE=1 for the offline demo client.
 
 python -m app.cli submit uploads/cat.jpg --user 1
-python -m app.cli worker --drain
+python -m app.cli worker [--drain]     # with DATABASE_URL: also reconciles DB<->Redis + retention
 python -m app.cli status <job_id>
 python -m app.cli stats
+python -m app.cli reconcile            # one DB<->Redis repair sweep (see docs/JOB_LIFECYCLE.md)
+python -m app.cli prune-media          # apply MEDIA_RETENTION_DAYS once
 """
 
 from __future__ import annotations
@@ -19,10 +22,22 @@ import threading
 from dotenv import load_dotenv
 
 from app.api.database import create_database
-from app.api.persistence import persist_api_result
-from app.config import Settings
+from app.config import Settings, env_flag
 from app.errors import ConfigError, MediaError
+from app.storage import storage_from_env
 from app.wiring import build_runtime
+
+
+def _database_url() -> str:
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url and env_flag("DEMO_MODE"):
+        url = "sqlite:///demo.sqlite3"  # same default as the API in demo mode
+    return url
+
+
+def _retention_days() -> int:
+    raw = os.environ.get("MEDIA_RETENTION_DAYS", "").strip()
+    return int(raw) if raw else 30
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("status")
     st.add_argument("job_id")
     sub.add_parser("stats")
+    sub.add_parser("reconcile", help="repair DB/Redis divergence once")
+    sub.add_parser("prune-media", help="delete originals past MEDIA_RETENTION_DAYS once")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -58,12 +75,14 @@ def main(argv: list[str] | None = None) -> int:
                 "ffmpeg is not installed; videos larger than MAX_VIDEO_MB=%d will fail compression",
                 rt.settings.max_video_mb,
             )
-        database_url = os.environ.get("DATABASE_URL", "").strip()
+        database_url = _database_url()
         db_engine = None
         if database_url:
+            from app.api.worker_setup import configure_worker
+
             db_engine, session_factory = create_database(database_url)
-            rt.worker.on_result = lambda job_id, result: persist_api_result(
-                session_factory, job_id, result
+            configure_worker(
+                rt, session_factory, storage_from_env(), retention_days=_retention_days()
             )
         try:
             if args.drain:
@@ -81,6 +100,26 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(rt.store.status(args.job_id), indent=2))
     elif args.cmd == "stats":
         print(json.dumps({**rt.queue.depths(), "gemini_calls_today": rt.limiter.used_today()}))
+    elif args.cmd in ("reconcile", "prune-media"):
+        database_url = _database_url()
+        if not database_url:
+            print("config error: DATABASE_URL is required", file=sys.stderr)
+            return 2
+        db_engine, session_factory = create_database(database_url)
+        try:
+            if args.cmd == "reconcile":
+                from app.api.reconcile import Reconciler
+
+                out = Reconciler(session_factory, rt.store, rt.queue, storage_from_env()).run_once()
+            else:
+                from app.api.retention import prune_media
+
+                out = prune_media(
+                    session_factory, storage_from_env(), retention_days=_retention_days()
+                )
+            print(json.dumps(out))
+        finally:
+            db_engine.dispose()
     return 0
 
 

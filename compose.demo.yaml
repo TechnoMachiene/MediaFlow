@@ -1,0 +1,81 @@
+# MediaFlow demo: the whole product with no Gemini key and nothing installed but Docker.
+#
+#   docker compose -f compose.demo.yaml up --build        # then open http://localhost:8081
+#
+# Sign in as demo-admin@example.com / demo-manager@example.com / demo-member@example.com,
+# password demo-password-123 (the sign-in page also has one-click buttons).
+#
+# Self-contained on purpose: it does not extend compose.yaml and reads nothing from .env except
+# the optional MEDIAFLOW_DEMO_PORT, so a real configuration can never leak in. It runs as its
+# own Compose project with its own volumes. Remove everything with:
+#   docker compose -f compose.demo.yaml down --volumes
+name: mediaflow-demo
+
+x-app: &app
+  build: .
+  image: mediaflow:latest
+  restart: unless-stopped
+  environment:
+    DEMO_MODE: "1"              # scripted drafts; refuses to start next to a real key/queue/DB
+    GEMINI_API_KEY: ""
+    QUEUE_PREFIX: demo
+    DATABASE_URL: postgresql+psycopg://mediaflow:mediaflow@postgres:5432/mediaflow
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET: demo-mode-only-secret-not-for-real-use-xxxxxxxx
+    MEDIA_STORAGE: local
+    MEDIA_STORAGE_DIR: /app/uploads
+    ALLOW_SIGNUP: "1"
+    EMBEDDED_WORKER: "0"        # the separate worker service below does the processing
+  volumes:
+    - uploads:/app/uploads
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment: { POSTGRES_USER: mediaflow, POSTGRES_PASSWORD: mediaflow, POSTGRES_DB: mediaflow }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediaflow -d mediaflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    <<: *app
+    ports: ["${MEDIAFLOW_DEMO_PORT:-8081}:8000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.cli", "worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.cli", "stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  uploads:

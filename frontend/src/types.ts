@@ -9,6 +9,26 @@ export interface User {
   created_at: string;
 }
 
+export interface WorkspaceRef {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+/** The signed-in person, as seen from the workspace the request resolved to. */
+export interface Me extends User {
+  workspace: WorkspaceRef;
+  workspaces: WorkspaceRef[];
+  platform_admin: boolean;
+}
+
+export interface Meta {
+  demo_mode: boolean;
+  allow_signup: boolean;
+  demo_password: string | null;
+  demo_accounts: { email: string; role: Role }[];
+}
+
 export interface AnalysisResult {
   text: string;
   kind: MediaKind;
@@ -41,7 +61,8 @@ export interface Stats {
   processing: number;
   deferred: number;
   dead: number;
-  gemini_calls_today: number;
+  /** Installation-wide; null unless you are a platform admin. */
+  gemini_calls_today: number | null;
 }
 
 export interface Post {
