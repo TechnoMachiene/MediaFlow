@@ -33,7 +33,13 @@ x-app: &app
     MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-30}
     ALLOW_SIGNUP: ${ALLOW_SIGNUP:-0}
     EMBEDDED_WORKER: "0"
-    DEMO_MODE: ${DEMO_MODE:-0}
+    DEMO_MODE: "0"              # the demo has its own file: compose.demo.yaml
+    LOG_FORMAT: ${LOG_FORMAT:-json}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    METRICS_PORT: "9100"        # private: not published; scraped by compose.observability.yaml
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+    OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
   volumes:
     - uploads:/app/uploads
 

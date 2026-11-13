@@ -1,0 +1,137 @@
+# MediaFlow alerts. Every alert links to its section in docs/OPERATIONS.md: what it means,
+# what to check first, and what to do. Thresholds are starting points; tune to your traffic.
+groups:
+  - name: mediaflow-availability
+    rules:
+      - alert: MediaFlowNoWorkers
+        # One expression, one label set: "down" and "gone from discovery" must not look
+        # like two different alerts, or the `for` timer restarts when DNS drops the target.
+        expr: (sum(up{job="mediaflow-worker"}) or vector(0)) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: No queue worker is running - uploads will queue but never be analysed.
+          runbook: docs/OPERATIONS.md#mediaflownoworkers
+
+      - alert: MediaFlowWorkerStalled
+        expr: time() - max(mediaflow_worker_heartbeat_timestamp_seconds) > 120
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Workers are up but their loop has not run for {{ $value | humanizeDuration }}.
+          runbook: docs/OPERATIONS.md#mediaflowworkerstalled
+
+      - alert: MediaFlowAPIDown
+        # One expression, one label set: "down" and "gone from discovery" must not look
+        # like two different alerts, or the `for` timer restarts when DNS drops the target.
+        expr: (sum(up{job="mediaflow-api"}) or vector(0)) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: No API instance is answering metrics scrapes.
+          runbook: docs/OPERATIONS.md#mediaflowapidown
+
+      - alert: MediaFlowRedisDown
+        expr: min(mediaflow_redis_up) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Redis is not answering; uploads fail and nothing is processed.
+          runbook: docs/OPERATIONS.md#mediaflowredisdown
+
+  - name: mediaflow-queue
+    rules:
+      - alert: MediaFlowQueueBacklog
+        expr: max(mediaflow_queue_oldest_ready_age_seconds) > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: The next job in line has waited {{ $value | humanizeDuration }} since upload.
+          runbook: docs/OPERATIONS.md#mediaflowqueuebacklog
+
+      - alert: MediaFlowQueueBacklogCritical
+        expr: max(mediaflow_queue_oldest_ready_age_seconds) > 1800
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: Jobs have been waiting over 30 minutes to start.
+          runbook: docs/OPERATIONS.md#mediaflowqueuebacklog
+
+      - alert: MediaFlowJobFailureRate
+        expr: |
+          sum(rate(mediaflow_job_outcomes_total{outcome=~"failed|dead"}[15m]))
+            / sum(rate(mediaflow_job_outcomes_total{outcome=~"done|cached|failed|dead"}[15m]))
+            > 0.10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $value | humanizePercentage }} of finished jobs are failing.'
+          runbook: docs/OPERATIONS.md#mediaflowjobfailurerate
+
+      - alert: MediaFlowDeadLetters
+        expr: increase(mediaflow_job_outcomes_total{outcome="dead"}[30m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Jobs ran out of retries in the last 30 minutes.
+          runbook: docs/OPERATIONS.md#mediaflowdeadletters
+
+      - alert: MediaFlowSlowJobs
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(mediaflow_job_end_to_end_seconds_bucket[30m])))
+            > 120
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'p95 upload-to-draft time is {{ $value | humanizeDuration }} (SLO: 2 minutes).'
+          runbook: docs/OPERATIONS.md#mediaflowslowjobs
+
+  - name: mediaflow-gemini
+    rules:
+      - alert: MediaFlowGeminiRateLimited
+        expr: max(mediaflow_gemini_cooldown_seconds) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Gemini keeps answering 429; the fleet has been paused for 10+ minutes.
+          runbook: docs/OPERATIONS.md#mediaflowgeminiratelimited
+
+      - alert: MediaFlowGeminiQuotaNearlyUsed
+        expr: max(mediaflow_gemini_calls_today) / max(mediaflow_gemini_daily_limit) > 0.9
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $value | humanizePercentage }} of today''s Gemini quota is used.'
+          runbook: docs/OPERATIONS.md#mediaflowgeminiquotanearlyused
+
+  - name: mediaflow-consistency
+    rules:
+      - alert: MediaFlowStoresDiverged
+        expr: |
+          sum(increase(mediaflow_reconciler_actions_total{action=~"recovered|requeued|abandoned"}[1h]))
+            > 0
+        labels: { severity: warning }
+        annotations:
+          summary: The reconciler had to rebuild jobs Redis lost - check Redis persistence.
+          runbook: docs/OPERATIONS.md#mediaflowstoresdiverged
+
+  - name: mediaflow-api
+    rules:
+      - alert: MediaFlowAPIErrors
+        expr: |
+          sum(rate(mediaflow_http_requests_total{status=~"5.."}[10m]))
+            / sum(rate(mediaflow_http_requests_total[10m])) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $value | humanizePercentage }} of API requests return 5xx.'
+          runbook: docs/OPERATIONS.md#mediaflowapierrors
+
+      - alert: MediaFlowAPISlow
+        # POST /jobs deliberately waits up to 5 minutes for a result, so it is excluded.
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(
+            mediaflow_http_request_duration_seconds_bucket{route!="/api/v1/jobs"}[10m]))) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'p95 API latency is {{ $value | humanizeDuration }}.'
+          runbook: docs/OPERATIONS.md#mediaflowapislow

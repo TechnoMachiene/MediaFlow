@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import redis
 
 from app.media import inspect_media, make_cache_key, prompt_hash, sha256_file
+from app.obs import context as obs_context
+from app.obs import tracing
 from app.redis_queue import ReliableQueue
 from app.system_prompt import SYSTEM_PROMPT
 
@@ -78,6 +80,10 @@ class Job:
     cache_key: str
     status: str
     attempts: int
+    # Observability: when the job was accepted, and the request/trace that created it.
+    created_at: float = 0.0
+    request_id: str = ""
+    trace_context: dict = field(default_factory=dict)
 
     def spec(self) -> JobSpec:
         return JobSpec(
@@ -201,6 +207,9 @@ class JobStore:
                 "error": "",
                 "created_at": now,
                 "updated_at": now,
+                # Carried to the worker so its logs and spans join the originating request.
+                "request_id": obs_context.get("request_id") or "",
+                "trace": json.dumps(tracing.inject()),
             },
         )
         pipe.expire(self._job(jid), self.job_ttl_s)
@@ -235,6 +244,9 @@ class JobStore:
             cache_key=d["cache_key"],
             status=d["status"],
             attempts=int(d["attempts"]),
+            created_at=float(d.get("created_at") or 0),
+            request_id=d.get("request_id", ""),
+            trace_context=json.loads(d["trace"]) if d.get("trace") else {},
         )
 
     def result_exists(self, cache_key: str) -> bool:

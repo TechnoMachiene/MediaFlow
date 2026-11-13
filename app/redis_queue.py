@@ -62,12 +62,31 @@ class ReliableQueue:
         self.processing = f"{prefix}:processing"
         self.deferred = f"{prefix}:deferred"
         self.dead = f"{prefix}:dead"
+        # ZSET: worker id -> unix time its liveness claim expires (Redis clock).
+        self.workers = f"{prefix}:workers"
         self._claim = r.register_script(CLAIM_LUA)
         self._reap = r.register_script(REAP_LUA)
         self._extend = r.register_script(EXTEND_LUA)
         self._locate = r.register_script(LOCATE_LUA)
         self._requeue = r.register_script(REQUEUE_LUA)
         self._promoter = DelayQueue(r, delayed=self.deferred, ready=self.ready)
+
+    # liveness: lets producers know whether anyone is consuming
+    def heartbeat(self, worker_id: str, ttl_s: float) -> None:
+        """Declare `worker_id` alive for `ttl_s` seconds (Redis clock, so hosts may drift)."""
+        sec, usec = self.r.time()
+        now = sec + usec / 1e6
+        pipe = self.r.pipeline(transaction=True)
+        pipe.zadd(self.workers, {worker_id: now + ttl_s})
+        pipe.zremrangebyscore(self.workers, "-inf", now)  # forget workers that stopped
+        pipe.execute()
+
+    def retire(self, worker_id: str) -> None:
+        self.r.zrem(self.workers, worker_id)
+
+    def live_workers(self) -> int:
+        sec, usec = self.r.time()
+        return int(self.r.zcount(self.workers, sec + usec / 1e6, "+inf"))
 
     # producer
     def push(self, job_id: str) -> None:

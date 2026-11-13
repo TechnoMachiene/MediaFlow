@@ -95,6 +95,26 @@ Compose to point at its own containers, and `.env` is never copied into the imag
 acceptable only because PostgreSQL is not published. Originals live in the `uploads` volume;
 for several hosts, use `MEDIA_STORAGE=s3` instead.
 
+## Observability
+
+Add one overlay to either stack to get metrics, alerts, a dashboard and distributed traces:
+
+```bash
+docker compose -f compose.demo.yaml -f compose.observability.yaml up -d --build --wait  # or: make obs-demo
+```
+
+| | |
+|---|---|
+| **Dashboard** | Grafana at <http://localhost:3000>: "MediaFlow – Operations" shows backlog and oldest waiting job, the upload→draft SLI, job outcomes and failure ratio, Gemini latency, quota and rate-limit pauses, API rate/latency/errors, and reconciler repairs. Viewing needs no login. There is no default admin password: set `GRAFANA_ADMIN_PASSWORD`, or read the random one from `docker compose logs grafana`. |
+| **Alerts** | 14 Prometheus rules (<http://localhost:9090/alerts>), each linked to a runbook entry in [docs/OPERATIONS.md](docs/OPERATIONS.md) and covered by `promtool` unit tests in CI. |
+| **Traces** | Jaeger at <http://localhost:16686>. A worker's `job.process` continues the trace of the upload request that created it, because the trace context travels in the Redis job hash. One trace shows the request, the queue and rate-limit wait, the Gemini call, and every SQL statement. |
+| **Logs** | JSON lines with `request_id`, `job_id` and `trace_id` on every line. The `X-Request-ID` returned by the API also appears on the worker's lines for that job. |
+| **Metrics** | Prometheus format on a private port (`METRICS_PORT`, never the public one), with bounded labels: no user, workspace or job ids. |
+
+Without the overlay, logs, trace ids and metrics are still produced. Point
+`OTEL_EXPORTER_OTLP_ENDPOINT` and your own Prometheus at any backend. The runbook lists every
+signal, the SLOs, and how to trace a single user's job.
+
 > **Current scope:** This project analyzes media and creates content suggestions. It does not
 > connect to Instagram, Facebook, or TikTok, and it does not automatically publish posts. The
 > calendar is for planning and tracking only.
@@ -402,8 +422,10 @@ protected super-admin account cannot be modified or deleted through the API. Wit
 
 Review items include the submitter's email and protected media URL. Once a job is approved or
 rejected, it no longer appears in the pending review list. Upload responses include the result
-when processing finishes during the response wait; otherwise the API returns `202 Accepted` and
-the job can be checked later.
+when processing finishes during the response wait (up to 5 minutes); otherwise the API returns
+`202 Accepted` and the job can be checked later. The API only waits while a worker is alive:
+workers heartbeat into Redis, and with none alive, or if the last one stops mid-wait, the
+upload returns `202` within about a second instead of holding the request open.
 
 Supported uploads are JPG/JPEG, PNG, WebP, MP4, MOV, and WebM. Defaults are 10 MB per image,
 100 MB per processed video, and 1 GB per uploaded video before compression; configure these in
@@ -536,6 +558,8 @@ clean up tests.
 | `app/api/reconcile.py` | DB↔Redis reconciler and the shared job-dispatch step. |
 | `app/api/retention.py` | Media retention policy. |
 | `app/storage.py` | Local and S3-compatible media storage backends. |
+| `app/obs/` | Structured logging, correlation ids, tracing (incl. across the queue), metrics. |
+| `ops/` | Prometheus scrape config, alert rules and their tests, Grafana provisioning and dashboard. |
 | `app/demo.py` | Demo-mode draft writer and demo account seeding. |
 | `app/cli.py` | Command-line job submission, status/stats, and worker entry point. |
 | `app/jobs.py` | Job records, submission, and deduplication. |
@@ -547,6 +571,7 @@ clean up tests.
 | `app/system_prompt.py` | Instructions for media analysis and content-draft generation. |
 | `migrations/` | Alembic schema history. |
 | `docs/JOB_LIFECYCLE.md` | Cross-store job lifecycle, failure matrix, guarantees. |
+| `docs/OPERATIONS.md` | Runbook: signals, SLOs, investigating a job, what to do for each alert. |
 | `tests/` | Unit, integration, and optional live tests. |
 
 ## Deployment notes

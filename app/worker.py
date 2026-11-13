@@ -13,16 +13,32 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import logging
+import os
+import socket
 import threading
 import time
+import uuid
 from collections.abc import Callable
 
 from app.errors import Permanent, RateLimited, Transient
 from app.jobs import JobStore
 from app.limiter import GeminiLimiter, backoff_s
+from app.obs import context as obs_context
+from app.obs import tracing
+from app.obs.metrics import (
+    GEMINI_DURATION,
+    JOB_END_TO_END,
+    JOB_OUTCOMES,
+    JOB_QUEUE_WAIT,
+    WORKER_HEARTBEAT,
+)
 from app.redis_queue import ReliableQueue
 
 log = logging.getLogger("worker")
+# Liveness in Redis (queue.workers). Idle workers refresh every few seconds; a busy worker
+# claims the whole lease. The API reads it to avoid waiting on a queue nobody consumes.
+HEARTBEAT_EVERY_S = 5.0
+HEARTBEAT_TTL_S = 30.0
 
 
 class Worker:
@@ -50,6 +66,8 @@ class Worker:
         self.materialize = materialize or contextlib.nullcontext
         # (interval_s, fn, next_due) - housekeeping run from the worker loop.
         self._periodic: list[list] = []
+        self.worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
+        self._next_beat = 0.0
 
     def every(self, interval_s: float, fn: Callable[[], object]) -> None:
         """Run `fn` from the worker loop at most once per `interval_s` (first run: immediately)."""
@@ -65,14 +83,44 @@ class Worker:
                         status, job_id, exc_info=True)
 
     def process_one(self) -> str:
-        """Returns: idle | missing | cached | deferred | done | retry | dead | failed"""
+        """Returns: idle | missing | cached | deferred | done | retry | dead | failed |
+        persist_retry"""
         jid = self.queue.claim()
         if jid is None:
             return "idle"
+        # Busy: stay "alive" for the whole lease, so a long Gemini call or video compression
+        # isn't mistaken for a dead worker by the API.
+        self._beat(self.queue.lease_s, force=True)
         job = self.store.get(jid)
         if job is None:
             self.queue.ack(jid)
+            JOB_OUTCOMES.labels("missing").inc()
             return "missing"
+        # Everything below logs with this job's id and the id of the request that created it,
+        # and its spans continue the upload request's trace across the queue.
+        started = time.perf_counter()
+        with obs_context.bind(job_id=jid, request_id=job.request_id or None), tracing.span(
+            "job.process", parent=job.trace_context, **{
+                "mediaflow.job_id": jid, "mediaflow.media_kind": job.kind,
+                "mediaflow.attempt": job.attempts + 1,
+            },
+        ) as current:
+            outcome = self._handle(jid, job)
+            current.set_attribute("mediaflow.outcome", outcome)
+            if outcome in ("failed", "dead"):
+                tracing.mark_error(current, outcome)
+            JOB_OUTCOMES.labels(outcome).inc()
+            if outcome in ("done", "cached") and job.created_at:
+                JOB_END_TO_END.observe(max(0.0, time.time() - job.created_at))
+            log.log(
+                logging.WARNING if outcome in ("failed", "dead") else logging.INFO,
+                "job %s", outcome,
+                extra={"outcome": outcome, "kind": job.kind,
+                       "duration_ms": round((time.perf_counter() - started) * 1000, 1)},
+            )
+            return outcome
+
+    def _handle(self, jid: str, job) -> str:
         if self.store.result_exists(job.cache_key):  # solved elsewhere / crash-replay
             result = self.store.get_result(job.cache_key)
             self.store.finish_cached(job)
@@ -94,14 +142,37 @@ class Worker:
             waited += wait
 
         attempts = self.store.incr_attempts(jid)
+        if attempts == 1 and job.created_at:  # first time it actually starts: queue wait
+            JOB_QUEUE_WAIT.observe(max(0.0, time.time() - job.created_at))
         self.store.mark(jid, status="processing")
         self._notify(jid, "processing")
+        call_result, call_started = "ok", time.perf_counter()
         try:
-            with self.materialize(job.path) as local_path:
+            with self.materialize(job.path) as local_path, tracing.span(
+                "gemini.analyse", **{"mediaflow.media_kind": job.kind, "gen_ai.request.model":
+                                     job.model},
+            ):
                 spec = job.spec()
                 if local_path != spec.path:
                     spec = dataclasses.replace(spec, path=local_path)
-                result = self.client.analyse(spec)
+                try:
+                    result = self.client.analyse(spec)
+                except Permanent:
+                    call_result = "permanent"
+                    raise
+                except RateLimited:
+                    call_result = "rate_limited"
+                    raise
+                except Transient:
+                    call_result = "transient"
+                    raise
+                except Exception:
+                    call_result = "error"
+                    raise
+                finally:
+                    GEMINI_DURATION.labels(job.kind, call_result).observe(
+                        time.perf_counter() - call_started
+                    )
         except Permanent as e:
             self.store.finish_failed(job, "failed", str(e))
             self._notify(jid, "failed", str(e))
@@ -144,7 +215,20 @@ class Worker:
         self._notify(job.job_id, "retrying", str(err)[:300])
         return "retry"
 
+    def _beat(self, ttl_s: float, *, force: bool = False) -> None:
+        """Tell producers someone is consuming. Throttled; failures never stop the worker."""
+        now = time.monotonic()
+        if not force and now < self._next_beat:
+            return
+        self._next_beat = now + HEARTBEAT_EVERY_S
+        try:
+            self.queue.heartbeat(self.worker_id, ttl_s)
+        except Exception:
+            log.warning("could not write worker heartbeat", exc_info=True)
+
     def maintenance(self) -> None:
+        WORKER_HEARTBEAT.set_to_current_time()
+        self._beat(HEARTBEAT_TTL_S)
         self.queue.promote_deferred()
         self.queue.reap()
         now = time.monotonic()
@@ -159,10 +243,16 @@ class Worker:
                 log.exception("periodic task %s failed", getattr(fn, "__name__", fn))
 
     def run(self, stop: threading.Event, poll_s: float = 1.0) -> None:
-        while not stop.is_set():
-            self.maintenance()
-            if self.process_one() == "idle":
-                stop.wait(poll_s)
+        try:
+            while not stop.is_set():
+                self.maintenance()
+                if self.process_one() == "idle":
+                    stop.wait(poll_s)
+        finally:
+            try:  # leave cleanly so the API stops waiting on us at once
+                self.queue.retire(self.worker_id)
+            except Exception:
+                log.warning("could not retire worker heartbeat", exc_info=True)
 
     def drain(self, max_idle_rounds: int = 3, poll_s: float = 0.2) -> dict[str, int]:
         """Process until queue stays empty. For demos and tests."""

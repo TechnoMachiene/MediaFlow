@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 import uuid
@@ -79,10 +80,14 @@ from app.api.schemas import (
 from app.api.security import create_versioned_access_token, hash_password, verify_password
 from app.errors import MediaError
 from app.media import ALLOWED, inspect_media
+from app.obs.metrics import JOBS_ACCEPTED
 
+log = logging.getLogger("api.jobs")
 router = APIRouter(prefix="/api/v1")
 JOB_RESULT_WAIT_S = 5 * 60
 JOB_RESULT_POLL_S = 0.25
+WORKER_GRACE_S = 1.0     # a just-started worker gets this long to send its first heartbeat
+WORKER_RECHECK_S = 2.0   # then liveness is re-checked, so a worker dying mid-wait is noticed
 
 
 def _token(request: Request, user: User) -> TokenResponse:
@@ -525,17 +530,34 @@ def upload_job(
             db.commit()
         except Exception:
             db.rollback()
+            JOBS_ACCEPTED.labels("dispatch_failed").inc()
+            log.exception("could not hand job to the queue", extra={"job_id": job_id})
             # Best-effort compensation; if this fails too, the reconciler will dispatch it.
             db.execute(delete(ApiJob).where(ApiJob.id == job_id))
             db.commit()
             raise
+        JOBS_ACCEPTED.labels(result["status"]).inc()
+        log.info(
+            "job accepted",
+            extra={"job_id": job_id, "dispatch": result["status"], "kind": kind, "bytes": size},
+        )
 
+        # Wait briefly for the result, but only while some worker is consuming the queue:
+        # with none alive, holding the request open for minutes helps nobody. The job stays
+        # safely queued either way, and the client gets 202 to poll.
         deadline = time.monotonic() + JOB_RESULT_WAIT_S
+        next_liveness_check = time.monotonic() + WORKER_GRACE_S
         job_status = runtime.store.status(job_id)
         while (
             job_status["status"] in ACTIVE_STATUSES
             and time.monotonic() < deadline
         ):
+            if time.monotonic() >= next_liveness_check:
+                if runtime.queue.live_workers() == 0:
+                    log.warning("no live worker; not waiting for the result",
+                                extra={"job_id": job_id})
+                    break
+                next_liveness_check = time.monotonic() + WORKER_RECHECK_S
             time.sleep(min(JOB_RESULT_POLL_S, max(0, deadline - time.monotonic())))
             job_status = runtime.store.status(job_id)
 

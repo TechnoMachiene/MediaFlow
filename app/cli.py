@@ -24,6 +24,9 @@ from dotenv import load_dotenv
 from app.api.database import create_database
 from app.config import Settings, env_flag
 from app.errors import ConfigError, MediaError
+from app.obs import metrics
+from app.obs.logs import configure_logging
+from app.obs.tracing import configure_tracing, instrument_engine, shutdown_tracing
 from app.storage import storage_from_env
 from app.wiring import build_runtime
 
@@ -56,7 +59,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("prune-media", help="delete originals past MEDIA_RETENTION_DAYS once")
     args = ap.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    service = "mediaflow-worker" if args.cmd == "worker" else "mediaflow-cli"
+    configure_logging(service)
+    if args.cmd in ("worker", "reconcile", "prune-media"):
+        # Not for status/stats: the worker healthcheck runs `stats` every 30 s.
+        configure_tracing(service)
     try:
         rt = build_runtime(Settings.from_env())
     except ConfigError as e:
@@ -81,9 +88,18 @@ def main(argv: list[str] | None = None) -> int:
             from app.api.worker_setup import configure_worker
 
             db_engine, session_factory = create_database(database_url)
+            instrument_engine(db_engine)
             configure_worker(
                 rt, session_factory, storage_from_env(), retention_days=_retention_days()
             )
+        if not args.drain:
+            metrics.serve(metrics.metrics_port())
+        logging.getLogger("worker").info(
+            "worker started",
+            extra={"queue_prefix": rt.settings.prefix, "model": rt.settings.model,
+                   "rpm": rt.settings.rpm, "rpd": rt.settings.rpd,
+                   "database": bool(db_engine), "demo_mode": rt.settings.demo_mode},
+        )
         try:
             if args.drain:
                 print(json.dumps(rt.worker.drain()))
@@ -96,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if db_engine is not None:
                 db_engine.dispose()
+            shutdown_tracing()  # flush spans still buffered for export
     elif args.cmd == "status":
         print(json.dumps(rt.store.status(args.job_id), indent=2))
     elif args.cmd == "stats":

@@ -34,6 +34,8 @@ from app.api.database import ACTIVE_STATUSES, ApiJob
 from app.api.media_storage import locate_job_media
 from app.jobs import JobStore
 from app.media import ALLOWED, sha256_file
+from app.obs import tracing
+from app.obs.metrics import RECONCILER_ACTIONS
 from app.redis_queue import ReliableQueue
 from app.storage import MediaStorage
 
@@ -102,10 +104,16 @@ class Reconciler:
             return {"skipped": 1}
         try:
             counts: Counter[str] = Counter()
-            self._dispatch_pending(counts)
-            self._sync_active(counts)
-            if counts:
-                log.info("reconciled: %s", dict(counts))
+            with tracing.span("reconcile.sweep") as current:
+                self._dispatch_pending(counts)
+                self._sync_active(counts)
+                for action, n in counts.items():
+                    current.set_attribute(f"mediaflow.reconcile.{action}", n)
+                    RECONCILER_ACTIONS.labels(action).inc(n)
+            repairs = {k: v for k, v in counts.items() if k != "unchanged"}
+            if repairs:
+                # Any repair means the two stores had diverged: worth a look (see runbook).
+                log.warning("reconciler repaired jobs", extra={"repairs": repairs})
             return dict(counts)
         finally:
             self.store._del_if_eq(keys=[self._lock_key], args=[token])
@@ -136,7 +144,9 @@ class Reconciler:
                 if row is None:
                     continue
                 out = dispatch_job(db, row, self.store, self.storage)
-                counts["failed" if out["status"] == "failed" else "dispatched"] += 1
+                action = "failed" if out["status"] == "failed" else "dispatched"
+                counts[action] += 1
+                log.info("reconciler %s job", action, extra={"job_id": job_id, "action": action})
 
     def _sync_active(self, counts: Counter) -> None:
         cutoff = self._cutoff()
@@ -153,7 +163,11 @@ class Reconciler:
                 row = self._locked_row(db, job_id, *stale)
                 if row is None:
                     continue
-                counts[self._sync_one(db, row)] += 1
+                action = self._sync_one(db, row)
+                counts[action] += 1
+                if action != "unchanged":
+                    log.info("reconciler %s job", action,
+                             extra={"job_id": job_id, "action": action})
 
     def _sync_one(self, db: Session, row: ApiJob) -> str:
         now = datetime.now(timezone.utc)

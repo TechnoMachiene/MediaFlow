@@ -54,6 +54,7 @@ def current_user(
             "Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    request.state.user_id = user.id  # for the access log (ids only, never emails)
     return user
 
 
@@ -85,6 +86,7 @@ def effective_role(user: User, membership_role: str) -> str:
 
 
 def current_member(
+    request: Request,
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
     workspace_id: Annotated[str | None, Header(alias="X-Workspace-Id", max_length=36)] = None,
@@ -109,6 +111,7 @@ def current_member(
             else "Your account does not belong to any workspace",
         )
     role, ws_id, ws_name = row
+    request.state.workspace_id = ws_id
     return Member(user=user, workspace_id=ws_id, workspace_name=ws_name,
                   role=effective_role(user, role))
 

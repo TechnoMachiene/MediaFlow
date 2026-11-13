@@ -25,6 +25,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from app.api.database import ACTIVE_STATUSES, ApiJob, MediaAsset, ScheduledPost
+from app.obs.metrics import RETENTION_PURGED
 from app.storage import LocalStorage, MediaStorage
 
 log = logging.getLogger("retention")
@@ -87,6 +88,7 @@ def prune_media(
             storage.delete(asset.stored_filename)
             asset.purged_at = now
             counts["purged"] += 1
+            RETENTION_PURGED.inc()
     if counts["purged"]:
         log.info("retention purged %d original(s) idle since %s", counts["purged"], cutoff)
     return counts

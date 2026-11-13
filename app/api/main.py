@@ -23,6 +23,10 @@ from app.api.database import (
 from app.api.routes import router
 from app.api.worker_setup import configure_worker
 from app.config import Settings
+from app.obs import metrics
+from app.obs.http import ObservabilityMiddleware
+from app.obs.logs import configure_logging
+from app.obs.tracing import configure_tracing, instrument_app, instrument_engine
 from app.wiring import Runtime, build_runtime
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -42,12 +46,17 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         load_dotenv()
+        configure_logging("mediaflow-api")
+        configure_tracing("mediaflow-api")
         cfg = api_settings or ApiSettings.from_env()
         rt = runtime or build_runtime(app_settings or Settings.from_env())
         db_engine = engine
         db_sessions = session_factory
         if db_engine is None or db_sessions is None:
             db_engine, db_sessions = create_database(cfg.database_url)
+            instrument_engine(db_engine)
+        metrics.watch_queue(rt)
+        metrics.serve(metrics.metrics_port())
         if cfg.demo_mode:
             if cfg.database_url.startswith("sqlite"):
                 Base.metadata.create_all(db_engine)  # zero-setup demo database
@@ -93,6 +102,10 @@ def create_app(
         lifespan=lifespan,
     )
     application.include_router(router)
+    # Order matters: tracing is added last so it is outermost, and the access log written by
+    # ObservabilityMiddleware happens inside the request span (and so carries its trace_id).
+    application.add_middleware(ObservabilityMiddleware)
+    instrument_app(application)
 
     @application.get("/health/live", tags=["health"])
     def liveness():

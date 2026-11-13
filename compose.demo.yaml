@@ -26,6 +26,8 @@ x-app: &app
     MEDIA_STORAGE_DIR: /app/uploads
     ALLOW_SIGNUP: "1"
     EMBEDDED_WORKER: "0"        # the separate worker service below does the processing
+    LOG_FORMAT: json
+    METRICS_PORT: "9100"        # private: not published; scraped by compose.observability.yaml
   volumes:
     - uploads:/app/uploads
 

@@ -32,6 +32,21 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+  alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prometheus config and alert rules are valid, and alerts fire as tested
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/ops/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.7.0 check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint promtool -v "$PWD/ops/prometheus:/p:ro" -w /p \
+            prom/prometheus:v3.7.0 test rules alerts_test.yml
+      - name: Dashboard JSON matches its generator
+        run: |
+          python3 ops/grafana/generate_dashboard.py /tmp/dashboard.json
+          diff <(python3 -m json.tool --sort-keys ops/grafana/dashboards/mediaflow.json) \
+               <(python3 -m json.tool --sort-keys /tmp/dashboard.json)
   image:
     runs-on: ubuntu-latest
     steps:

@@ -1,5 +1,6 @@
 .PHONY: setup lint unit integration live test cov done api worker demo migrate reconcile prune-media web web-dev web-test \
-	docker-up docker-down docker-logs docker-admin docker-demo docker-demo-down demo-check
+	docker-up docker-down docker-logs docker-admin docker-demo docker-demo-down demo-check \
+	obs-demo obs-up obs-urls alerts-test dashboard
 setup:        ; pip install -r requirements-dev.txt
 lint:         ; ruff check .
 unit:         ; pytest -m unit
@@ -36,3 +37,12 @@ docker-admin:     ; docker compose run --rm api python -m app.api.admin $(EMAIL)
 docker-demo:      ; $(DEMO_COMPOSE) up -d --build --wait && $(DEMO_COMPOSE) logs api | grep -A6 "DEMO MODE" ; echo "Demo: http://localhost:$${MEDIAFLOW_DEMO_PORT:-8081}"
 # Stops the demo stack and deletes its volumes (demo data is disposable; real data is untouched).
 docker-demo-down: ; $(DEMO_COMPOSE) down --volumes
+
+# ── Observability (Prometheus + Grafana + Jaeger; see docs/OPERATIONS.md) ──────────────────
+OBS = -f compose.observability.yaml
+# Demo stack with dashboards: make obs-demo   Real stack with dashboards: make obs-up
+obs-demo:         ; docker compose -f compose.demo.yaml $(OBS) up -d --build --wait && $(MAKE) -s obs-urls
+obs-up:           ; docker compose -f compose.yaml $(OBS) up -d --build --wait && $(MAKE) -s obs-urls
+obs-urls:         ; echo "Grafana http://localhost:3000 | Prometheus http://localhost:9090/alerts | Jaeger http://localhost:16686"
+alerts-test:      ; docker run --rm --entrypoint promtool -v "$(CURDIR)/ops/prometheus:/p:ro" -w /p prom/prometheus:v3.7.0 test rules alerts_test.yml
+dashboard:        ; python3 ops/grafana/generate_dashboard.py ops/grafana/dashboards/mediaflow.json
