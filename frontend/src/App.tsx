@@ -9,6 +9,7 @@ import type { Me, Meta, User } from './types';
 import { Button, ConfirmButton, ErrorNote, Icon, Spinner, type IconName } from './ui';
 import { uploads } from './uploads';
 import { Activity } from './views/Activity';
+import { Audit } from './views/Audit';
 import { Calendar } from './views/Calendar';
 import { AcceptInvite, readInviteToken } from './views/Invite';
 import { Library } from './views/Library';
@@ -16,13 +17,14 @@ import { Login } from './views/Login';
 import { Review } from './views/Review';
 import { Team } from './views/Team';
 
-type Route = 'library' | 'review' | 'calendar' | 'team' | 'activity';
+type Route = 'library' | 'review' | 'calendar' | 'team' | 'activity' | 'audit';
 const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boolean; view: () => React.JSX.Element }[] = [
   { id: 'library', label: 'Library', icon: 'library', allow: () => true, view: Library },
   { id: 'review', label: 'Review', icon: 'review', allow: (u) => isReviewer(u.role), view: Review },
   { id: 'calendar', label: 'Calendar', icon: 'calendar', allow: () => true, view: Calendar },
   { id: 'team', label: 'Team', icon: 'team', allow: (u) => isReviewer(u.role), view: Team },
   { id: 'activity', label: 'Activity', icon: 'activity', allow: (u) => isAdmin(u.role), view: Activity },
+  { id: 'audit', label: 'Audit', icon: 'lock', allow: (u) => isAdmin(u.role), view: Audit },
 ];
 
 const readRoute = () => window.location.hash.replace(/^#\/?/, '');

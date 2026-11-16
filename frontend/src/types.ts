@@ -53,6 +53,25 @@ export interface InvitationAccepted {
   workspace: WorkspaceRef;
 }
 
+export interface AuditEvent {
+  id: number;
+  created_at: string;
+  actor_id: string | null;
+  actor_email: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  target_label: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  request_id: string | null;
+}
+
+export interface AuditPage {
+  items: AuditEvent[];
+  next_before: number | null;
+}
+
 export interface Meta {
   demo_mode: boolean;
   allow_signup: boolean;

@@ -27,6 +27,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api import audit
 from app.api.database import (
     ACTIVE_STATUSES,
     ApiJob,
@@ -190,6 +191,11 @@ def create_user(payload: UserCreate, actor: CurrentMember, db: DbSession):
             "by signing in.",
         ) from None
     db.add(WorkspaceMember(workspace_id=actor.workspace_id, user_id=user.id, role=payload.role))
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action="member.created",
+        target_type="user", target_id=user.id, target_label=user.email,
+        after={"role": payload.role},
+    )
     db.commit()
     db.refresh(user)
     return _user_view(user, payload.role)
@@ -230,9 +236,21 @@ def update_user_role(user_id: str, payload: RoleUpdate, actor: CurrentMember, db
     _protect_super_admin(user)
     if membership.role == "admin" and payload.role != "admin":
         _ensure_another_admin(db, actor.workspace_id)
-    membership.role = payload.role
+    _change_role(db, actor, user, membership, payload.role)
     db.commit()
     return _user_view(user, membership.role)
+
+
+def _change_role(db: Session, actor: Member, user: User, membership: WorkspaceMember,
+                 role: str) -> None:
+    if membership.role == role:
+        return
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action="member.role_changed",
+        target_type="user", target_id=user.id, target_label=user.email,
+        before={"role": membership.role}, after={"role": role},
+    )
+    membership.role = role
 
 
 @router.patch("/users/{user_id}", response_model=UserView)
@@ -252,14 +270,25 @@ def update_user(user_id: str, payload: UserUpdate, actor: CurrentMember, db: DbS
     if payload.email is not None:
         if str(payload.email).lower() == SUPER_ADMIN_EMAIL:
             raise HTTPException(status.HTTP_409_CONFLICT, "The super-admin email is reserved")
-        user.email = str(payload.email).lower()
+        new_email = str(payload.email).lower()
+        if new_email != user.email:
+            audit.record(
+                db, workspace_id=actor.workspace_id, actor=actor, action="member.email_changed",
+                target_type="user", target_id=user.id, target_label=new_email,
+                before={"email": user.email}, after={"email": new_email},
+            )
+            user.email = new_email
     if payload.password is not None:
         user.password_hash = hash_password(payload.password)
         user.token_version += 1
+        audit.record(
+            db, workspace_id=actor.workspace_id, actor=actor, action="member.password_reset",
+            target_type="user", target_id=user.id, target_label=user.email,
+        )
     if payload.role is not None:
         if membership.role == "admin" and payload.role != "admin":
             _ensure_another_admin(db, actor.workspace_id)
-        membership.role = payload.role
+        _change_role(db, actor, user, membership, payload.role)
 
     try:
         db.commit()
@@ -303,6 +332,11 @@ def delete_user(user_id: str, actor: CurrentMember, db: DbSession, runtime: Queu
     if job_ids:
         db.execute(delete(ScheduledPost).where(ScheduledPost.job_id.in_(job_ids)))
         db.execute(delete(ApiJob).where(ApiJob.id.in_(job_ids)))
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action="member.removed",
+        target_type="user", target_id=user.id, target_label=user.email,
+        before={"role": membership.role}, after={"jobs_deleted": len(job_ids)},
+    )
     db.delete(membership)
     if not _other_workspaces(db, user.id, actor.workspace_id):
         db.delete(user)
@@ -359,8 +393,17 @@ def signup(payload: SignupRequest, request: Request, db: DbSession):
             status.HTTP_409_CONFLICT, "An account with that email already exists"
         ) from None
     db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin"))
+    _workspace_created(db, workspace, user)
     db.commit()
     return _token(request, user)
+
+
+def _workspace_created(db: Session, workspace: Workspace, user: User) -> None:
+    audit.record(
+        db, workspace_id=workspace.id, actor=user, action="workspace.created",
+        target_type="workspace", target_id=workspace.id, target_label=workspace.name,
+        after={"name": workspace.name, "admin": user.email},
+    )
 
 
 def _my_workspaces(db: Session, user: User) -> list[WorkspaceView]:
@@ -405,6 +448,7 @@ def create_workspace(payload: WorkspaceCreate, request: Request, user: CurrentUs
     db.add(workspace)
     db.flush()
     db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin"))
+    _workspace_created(db, workspace, user)
     db.commit()
     return WorkspaceView(id=workspace.id, name=workspace.name, role=effective_role(user, "admin"))
 
@@ -801,6 +845,12 @@ def review_job(
         )
     row.approval_status = decision.status
     owner = db.get(User, row.owner_id)
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action=f"job.{decision.status}",
+        target_type="job", target_id=row.id, target_label=row.filename,
+        before={"approval_status": "pending"},
+        after={"approval_status": decision.status, "owner": owner.email if owner else None},
+    )
     view = _job_view(
         row,
         runtime.store.status(job_id),
@@ -874,19 +924,32 @@ def cancel_job(job_id: str, user: CurrentMember, db: DbSession, runtime: QueueRu
             .where(ApiJob.id == job_id, ApiJob.enqueued_at.is_(None))
             .with_for_update()
         )
+        previous = pending.status if pending is not None else None
         if pending is not None and set_status(pending, "cancelled"):
             pending.updated_at = datetime.now(timezone.utc)
+            _job_cancelled(db, user, pending, previous)
             db.commit()
             return _job_view(pending, {"status": "cancelled"})
         db.rollback()
+    previous = row.status
     if not runtime.store.cancel(job_id):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "Job is already running or cannot be cancelled",
         )
     view = _job_view(row, runtime.store.status(job_id))
+    if row.status == "cancelled":
+        _job_cancelled(db, user, row, previous)
     db.commit()
     return view
+
+
+def _job_cancelled(db: Session, actor: Member, row: ApiJob, previous: str | None) -> None:
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action="job.cancelled",
+        target_type="job", target_id=row.id, target_label=row.filename,
+        before={"status": previous}, after={"status": "cancelled"},
+    )
 
 
 @router.get("/stats", response_model=StatsResponse)
@@ -1035,6 +1098,12 @@ def schedule_job(
     )
     db.add(post)
     try:
+        db.flush()
+        audit.record(
+            db, workspace_id=actor.workspace_id, actor=actor, action="post.scheduled",
+            target_type="post", target_id=post.id, target_label=job.filename,
+            after={**_when(post), "job_id": job.id},
+        )
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -1109,9 +1178,16 @@ def reschedule_post(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "scheduled_at must be in the future"
         )
+    before = _when(post)
     post.scheduled_at = payload.scheduled_at.astimezone(timezone.utc)
     post.timezone = payload.timezone
     post.status = "scheduled"
+    if _when(post) != before:
+        audit.record(
+            db, workspace_id=actor.workspace_id, actor=actor, action="post.rescheduled",
+            target_type="post", target_id=post.id, target_label=_post_label(db, post),
+            before=before, after=_when(post),
+        )
     db.commit()
     return _scheduled_post_view(db, post, payload.timezone)
 
@@ -1119,6 +1195,25 @@ def reschedule_post(
 @router.delete("/scheduled-posts/{post_id}", response_model=ScheduledPostView)
 def cancel_scheduled_post(post_id: str, actor: CurrentMember, db: DbSession):
     post = _workspace_post(db, actor, post_id)
+    if post.status != "cancelled":
+        audit.record(
+            db, workspace_id=actor.workspace_id, actor=actor, action="post.cancelled",
+            target_type="post", target_id=post.id, target_label=_post_label(db, post),
+            before=_when(post), after={"status": "cancelled"},
+        )
     post.status = "cancelled"
     db.commit()
     return _scheduled_post_view(db, post, post.timezone)
+
+
+def _when(post: ScheduledPost) -> dict:
+    return {
+        "scheduled_at": _as_utc(post.scheduled_at).isoformat(),
+        "timezone": post.timezone,
+        "status": post.status or "scheduled",
+    }
+
+
+def _post_label(db: Session, post: ScheduledPost) -> str | None:
+    job = db.get(ApiJob, post.job_id)
+    return job.filename if job else None

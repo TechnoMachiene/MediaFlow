@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
     create_engine,
@@ -103,6 +105,41 @@ class WorkspaceInvitation(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditEvent(Base):
+    """Append-only record of an authorization-relevant change in one workspace.
+
+    Written in the same transaction as the change, so neither commits without the other. Actor
+    and target are snapshots (ids and emails as they were) without foreign keys, so history
+    survives deleting the people involved. On PostgreSQL a trigger rejects UPDATE and DELETE
+    (migration 0014). See docs/AUDIT.md."""
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_workspace_id", "workspace_id", "id"),
+        Index("ix_audit_events_workspace_target", "workspace_id", "target_id"),
+    )
+
+    # Monotonic, so pages are stable (keyset on id) and gaps are visible.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_label: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    before: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class MediaAsset(Base):

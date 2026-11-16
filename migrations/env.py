@@ -11,7 +11,8 @@ from app.api.database import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Keep loggers that already exist (e.g. when tests run migrations in-process).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 load_dotenv()
 database_url = os.environ.get("DATABASE_URL")

@@ -130,6 +130,26 @@ class InvitationAccepted(TokenResponse):
     workspace: WorkspaceView
 
 
+class AuditEventView(BaseModel):
+    id: int
+    created_at: datetime
+    actor_id: str | None
+    actor_email: str
+    action: str
+    target_type: str
+    target_id: str
+    target_label: str | None
+    before: dict | None
+    after: dict | None
+    request_id: str | None
+
+
+class AuditPage(BaseModel):
+    items: list[AuditEventView]
+    # Pass as `before` to get the next (older) page; null when there are no more.
+    next_before: int | None
+
+
 class DemoAccount(BaseModel):
     email: str
     role: Role

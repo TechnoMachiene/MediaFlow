@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import select
 
+from app.api import audit
 from app.api.config import ApiSettings
 from app.api.database import User, Workspace, WorkspaceMember, create_database
 from app.api.roles import SUPER_ADMIN_EMAIL
@@ -66,10 +67,20 @@ def main(argv: list[str] | None = None) -> int:
             db.flush()
             workspace = _target_workspace(db, args.workspace)
             member = db.get(WorkspaceMember, (workspace.id, user.id))
+            # Out-of-band changes are audited too, with the CLI as the actor.
+            target = {"target_type": "user", "target_id": user.id, "target_label": email}
             if member is None:
                 db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin"))
-            else:
+                audit.record(db, workspace_id=workspace.id, actor=None, action="member.created",
+                             after={"role": "admin"}, **target)
+            elif member.role != "admin":
+                audit.record(db, workspace_id=workspace.id, actor=None,
+                             action="member.role_changed", before={"role": member.role},
+                             after={"role": "admin"}, **target)
                 member.role = "admin"
+            if action.startswith("Promoted"):
+                audit.record(db, workspace_id=workspace.id, actor=None,
+                             action="member.password_reset", **target)
             workspace_name = workspace.name
         print(f"{action} {role.replace('_', ' ')} account: {email} "
               f"(admin of workspace '{workspace_name}')")

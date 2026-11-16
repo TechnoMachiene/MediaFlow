@@ -142,6 +142,10 @@ signal, the SLOs, and how to trace a single user's job.
   people can belong to several with a different role in each, and dedup never crosses tenants.
   People join by **invitation**: a single-use, expiring link where newcomers choose their own
   password and existing accounts consent by signing in (see [docs/TENANCY.md](docs/TENANCY.md)).
+- Keeps an append-only **audit trail** of role and membership changes, invitations, review
+  decisions and calendar changes, written in the same transaction as each change, and a
+  route-by-route test suite proving no one can reach across a workspace boundary (see
+  [docs/AUDIT.md](docs/AUDIT.md)).
 - Supports members, managers and admins per workspace, platform admins, and a protected
   super-admin account.
 - Stores originals on local disk or any S3-compatible bucket, and applies a media retention
@@ -415,6 +419,7 @@ caller's role in that workspace, and records from other workspaces always answer
 | `POST /invitations/accept` | The invitee | New email: send a `password` to create the account. Existing account: call it signed in as that email. |
 | `POST /workspaces/{id}/leave` | Member of it | Leave a workspace (not your only one, not as its last admin). Your work stays with it. |
 | `PATCH /workspaces/{id}` | Admin of it | Rename the workspace. |
+| `GET /audit-events` | Admin | This workspace's audit trail, newest first; filter by `category`, `action`, `actor_id` or `target_id`, page with `before`. |
 
 Managers can create and invite users and managers, but not admins. A workspace always keeps at
 least one admin. An admin can change a member's email or password only if that account belongs

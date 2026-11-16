@@ -27,6 +27,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api import audit
 from app.api.database import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from app.api.dependencies import (
     CurrentMember,
@@ -125,7 +126,7 @@ def create_invitation(
         raise HTTPException(status.HTTP_409_CONFLICT, "That person is already in this workspace")
 
     now = datetime.now(timezone.utc)
-    db.execute(
+    replaced = db.execute(
         update(WorkspaceInvitation)
         .where(
             WorkspaceInvitation.workspace_id == actor.workspace_id,
@@ -134,7 +135,7 @@ def create_invitation(
             WorkspaceInvitation.revoked_at.is_(None),
         )
         .values(revoked_at=now)
-    )
+    ).rowcount
     token = secrets.token_urlsafe(32)
     ttl = timedelta(hours=request.app.state.api_settings.invitation_ttl_hours)
     inv = WorkspaceInvitation(
@@ -142,6 +143,13 @@ def create_invitation(
         token_sha256=_hash(token), invited_by=actor.id, created_at=now, expires_at=now + ttl,
     )
     db.add(inv)
+    db.flush()
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action="invitation.created",
+        target_type="invitation", target_id=inv.id, target_label=inv.email,
+        after={"role": inv.role, "expires_at": inv.expires_at.isoformat(),
+               "replaced_links": replaced},
+    )
     db.commit()
     log.info("invitation created", extra={"invitation_id": inv.id, "role": inv.role})
     return InvitationCreated(
@@ -187,6 +195,11 @@ def revoke_invitation(invitation_id: str, actor: CurrentMember, db: DbSession):
         )
     if inv.revoked_at is None:
         inv.revoked_at = datetime.now(timezone.utc)
+        audit.record(
+            db, workspace_id=actor.workspace_id, actor=actor, action="invitation.revoked",
+            target_type="invitation", target_id=inv.id, target_label=inv.email,
+            before={"role": inv.role},
+        )
         db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -264,6 +277,11 @@ def accept_invitation(
     if membership is None:
         membership = WorkspaceMember(workspace_id=inv.workspace_id, user_id=user.id, role=inv.role)
         db.add(membership)
+        audit.record(
+            db, workspace_id=inv.workspace_id, actor=user, action="member.joined",
+            target_type="user", target_id=user.id, target_label=user.email,
+            after={"role": inv.role, "invitation_id": inv.id, "new_account": caller is None},
+        )
     db.commit()
     workspace = db.get(Workspace, inv.workspace_id)
     log.info("invitation accepted", extra={"invitation_id": inv.id, "new_account": caller is None})
@@ -310,6 +328,11 @@ def leave_workspace(workspace_id: str, user: CurrentUser, db: DbSession):
                 status.HTTP_409_CONFLICT,
                 "You are this workspace's only admin. Make someone else an admin first.",
             )
+    audit.record(
+        db, workspace_id=workspace_id, actor=user, action="member.left",
+        target_type="user", target_id=user.id, target_label=user.email,
+        before={"role": membership.role},
+    )
     db.delete(membership)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -323,6 +346,12 @@ def rename_workspace(workspace_id: str, payload: WorkspaceRename, user: CurrentU
     if role not in {"admin", "super_admin"}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     workspace = db.get(Workspace, workspace_id)
-    workspace.name = payload.name
+    if workspace.name != payload.name:
+        audit.record(
+            db, workspace_id=workspace_id, actor=user, action="workspace.renamed",
+            target_type="workspace", target_id=workspace_id, target_label=payload.name,
+            before={"name": workspace.name}, after={"name": payload.name},
+        )
+        workspace.name = payload.name
     db.commit()
     return WorkspaceView(id=workspace.id, name=workspace.name, role=role)

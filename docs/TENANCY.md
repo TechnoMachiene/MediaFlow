@@ -121,11 +121,19 @@ the same trust as `POST /users` today, but the password stays private to the inv
   account itself is deleted only if it belongs to no other workspace.
 - Deleting an inviter keeps their pending invitations valid (`invited_by` becomes `NULL`).
 
+## Proof and history
+
+- `tests/integration/test_tenant_isolation.py` tries every id-taking route as three outsiders
+  (another workspace's admin, a platform admin, a member), with valid payloads and a spoofed
+  `X-Workspace-Id`. Each attempt must be refused, leak nothing, and leave the target workspace
+  byte-for-byte unchanged, while the same request from an insider succeeds. A guard test fails
+  if a new route isn't classified there.
+- Every membership, role, invitation, review and calendar change is in the audit trail
+  ([AUDIT.md](AUDIT.md)).
+
 ## What is not here yet
 
 - Per-workspace quotas or billing; the Gemini rate limit is shared by the installation.
 - Email delivery of invitations.
-- An audit log of membership changes (accepted invitations do record `accepted_by` and
-  `accepted_at`).
 - An organization level above workspaces. Today one organization is one workspace; a person who
   works for several clients holds one membership per client workspace.

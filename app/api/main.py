@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 
+from app.api.audit_api import router as audit_router
 from app.api.config import ApiSettings
 from app.api.database import (
     ApiJob,
@@ -104,6 +105,7 @@ def create_app(
     )
     application.include_router(router)
     application.include_router(workspaces_router)
+    application.include_router(audit_router)
     # Order matters: tracing is added last so it is outermost, and the access log written by
     # ObservabilityMiddleware happens inside the request span (and so carries its trace_id).
     application.add_middleware(ObservabilityMiddleware)
