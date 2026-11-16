@@ -9,9 +9,12 @@ import threading
 import pytest
 import redis
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import event, update
+from sqlalchemy.exc import OperationalError
 
+from app.api import routes
 from app.api.database import ApiJob, MediaAsset
+from app.api.persistence import persist_api_result, persist_api_status
 from app.api.reconcile import LOST, MEDIA_GONE, Reconciler
 from app.errors import Permanent, Transient
 from tests.api_harness import add_member, build_app, login, png, upload
@@ -88,17 +91,144 @@ def test_row_committed_but_never_dispatched_is_dispatched_by_reconciler(system):
     assert len(gemini.calls) == 1
 
 
-def test_redis_down_during_upload_rolls_the_row_back(system, monkeypatch):
-    client, runtime, sessions, _, _, owner = system
+def redis_unreachable(*args, **kwargs):
+    raise redis.ConnectionError("Redis is unavailable")
 
-    def redis_down(*args, **kwargs):
-        raise redis.ConnectionError("Redis is unavailable")
 
-    monkeypatch.setattr(runtime.store, "submit_prepared", redis_down)
-    with pytest.raises(redis.ConnectionError):
-        upload(client, owner, png())
-    with sessions() as db:
-        assert db.query(ApiJob).count() == 0  # compensated: no orphan for the user to see
+def test_redis_down_during_upload_keeps_the_job_in_the_outbox(system, monkeypatch):
+    client, runtime, sessions, gemini, reconciler, owner = system
+    real_submit = runtime.store.submit_prepared
+    monkeypatch.setattr(runtime.store, "submit_prepared", redis_unreachable)
+    response = upload(client, owner, png())
+    # Committed means accepted: the client is told so and gets the id to poll.
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    assert response.json()["status"] == "queued"
+    stored = row(sessions, job_id)
+    assert stored.enqueued_at is None and stored.status == "queued"
+    assert runtime.store.status(job_id)["status"] == "unknown"
+
+    monkeypatch.setattr(runtime.store, "submit_prepared", real_submit)  # Redis is back
+    assert reconciler.run_once()["dispatched"] == 1
+    runtime.worker.drain()
+    assert row(sessions, job_id).status == "done"
+    assert len(gemini.calls) == 1
+
+
+def test_redis_reply_lost_after_it_accepted_the_job_never_double_enqueues(system, monkeypatch):
+    """Redis ran the submit, but the connection dropped before the API saw the reply."""
+    client, runtime, sessions, gemini, reconciler, owner = system
+    real_submit = runtime.store.submit_prepared
+
+    def accepted_then_lost(*args, **kwargs):
+        real_submit(*args, **kwargs)
+        raise redis.TimeoutError("Timeout reading from socket")
+
+    monkeypatch.setattr(runtime.store, "submit_prepared", accepted_then_lost)
+    response = upload(client, owner, png())
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    assert row(sessions, job_id).enqueued_at is None
+    assert runtime.queue.depths()["ready"] == 1  # Redis has it
+
+    monkeypatch.setattr(runtime.store, "submit_prepared", real_submit)
+    assert reconciler.run_once()["dispatched"] == 1  # records enqueued_at; pushes nothing
+    assert runtime.queue.depths()["ready"] == 1
+    runtime.worker.drain()
+    assert row(sessions, job_id).status == "done"
+    assert len(gemini.calls) == 1
+
+
+def test_enqueued_at_commit_fails_after_redis_accepted(system, monkeypatch):
+    """The database write *after* the queue write fails: a real failed COMMIT."""
+    client, runtime, sessions, gemini, reconciler, owner = system
+    real_dispatch = routes.dispatch_job
+
+    def dispatch_then_db_dies(db, *args, **kwargs):
+        out = real_dispatch(db, *args, **kwargs)
+
+        def boom(session):
+            raise OperationalError("COMMIT", {}, Exception("server closed the connection"))
+
+        event.listen(db, "before_commit", boom, once=True)
+        return out
+
+    monkeypatch.setattr(routes, "dispatch_job", dispatch_then_db_dies)
+    response = upload(client, owner, png())
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    assert row(sessions, job_id).enqueued_at is None
+    assert runtime.store.status(job_id)["status"] == "queued"
+
+    monkeypatch.setattr(routes, "dispatch_job", real_dispatch)
+    assert reconciler.run_once()["dispatched"] == 1
+    assert runtime.queue.depths()["ready"] == 1
+    runtime.worker.drain()
+    assert row(sessions, job_id).status == "done"
+    assert len(gemini.calls) == 1
+
+
+def test_submitted_marker_without_job_hash_is_dispatched_not_stranded(system):
+    """Partial Redis loss: the per-job `submitted` marker survived, the job hash didn't. A
+    re-dispatch must enqueue the job, not report "unknown" and leave the row inactive."""
+    client, runtime, sessions, gemini, reconciler, owner = system
+    job_id = upload(client, owner, png()).json()["job_id"]
+    s = runtime.store
+    runtime.r.delete(s._job(job_id), s._inflight(s.get(job_id).cache_key))
+    runtime.r.lrem(runtime.queue.ready, 0, job_id)
+    assert runtime.r.exists(s._submitted(job_id))
+    with sessions.begin() as db:
+        db.execute(update(ApiJob).where(ApiJob.id == job_id).values(enqueued_at=None))
+
+    assert reconciler.run_once()["dispatched"] == 1
+    assert row(sessions, job_id).status == "queued"
+    assert runtime.queue.depths()["ready"] == 1
+    runtime.worker.drain()
+    assert row(sessions, job_id).status == "done"
+
+
+def test_job_accepted_while_redis_was_down_can_be_cancelled(system, monkeypatch):
+    client, runtime, sessions, gemini, reconciler, owner = system
+    monkeypatch.setattr(runtime.store, "submit_prepared", redis_unreachable)
+    job_id = upload(client, owner, png()).json()["job_id"]
+    monkeypatch.undo()
+
+    response = client.delete(f"/api/v1/jobs/{job_id}", headers=owner)
+    assert response.status_code == 200 and response.json()["status"] == "cancelled"
+    assert reconciler.run_once() == {}  # a cancelled row is never dispatched
+    runtime.worker.drain()
+    assert row(sessions, job_id).status == "cancelled"
+    assert gemini.calls == []
+
+
+def test_cancel_reached_redis_but_the_db_write_was_lost(system):
+    client, runtime, sessions, gemini, reconciler, owner = system
+    job_id = upload(client, owner, png()).json()["job_id"]
+    assert runtime.store.cancel(job_id)  # the API died before its commit
+    assert row(sessions, job_id).status == "queued"
+
+    assert reconciler.run_once() == {"synced": 1}
+    assert row(sessions, job_id).status == "cancelled"
+
+
+def test_late_status_hooks_cannot_move_a_job_out_of_a_final_state(system):
+    client, runtime, sessions, gemini, _, owner = system
+    done = upload(client, owner, png((1, 0, 0))).json()["job_id"]
+    runtime.worker.drain()
+    gave_up = upload(client, owner, png((2, 0, 0))).json()["job_id"]
+    with sessions.begin() as db:
+        db.execute(update(ApiJob).where(ApiJob.id == gave_up).values(status="dead"))
+
+    # A worker whose lease expired wakes up and reports on jobs that already ended.
+    for status in ("processing", "retrying", "queued", "failed"):
+        persist_api_status(sessions, done, status, "stale")
+        persist_api_status(sessions, gave_up, status, "stale")
+    assert row(sessions, done).status == "done"
+    assert row(sessions, gave_up).status == "dead"
+
+    # ...but a real result from a redelivered attempt still beats "dead".
+    persist_api_result(sessions, gave_up, {"text": "late but real"})
+    assert row(sessions, gave_up).status == "done"
 
 
 def test_dispatch_is_idempotent_so_a_retried_dispatch_never_double_enqueues(system):

@@ -18,7 +18,17 @@ export interface Upload {
   /** uploading: bytes in flight · sent: server is validating/analyzing · error: rejected */
   phase: 'uploading' | 'sent' | 'error';
   error?: string;
+  /** Network or server failure: the same request can be sent again safely. */
+  retryable?: boolean;
   startedAt: number;
+}
+
+/** What a retry needs. Kept out of `Upload` so the rendered state stays plain data. */
+const pending = new Map<string, { file: File; key: string }>();
+
+function newKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${seq}`;
 }
 
 interface State {
@@ -39,6 +49,7 @@ function patch(id: string, change: Partial<Upload>) {
   set({ items: state.items.map((u) => (u.id === id ? { ...u, ...change } : u)) });
 }
 function drop(id: string, settled = false) {
+  pending.delete(id);
   const item = state.items.find((u) => u.id === id);
   if (item?.preview) URL.revokeObjectURL(item.preview);
   set({
@@ -47,11 +58,36 @@ function drop(id: string, settled = false) {
   });
 }
 
+function send(id: string) {
+  const job = pending.get(id);
+  if (!job) return;
+  uploadFile(
+    job.file,
+    job.key,
+    (progress) => patch(id, { progress }),
+    () => patch(id, { progress: 1, phase: 'sent' }),
+  ).then(
+    () => drop(id, true),
+    (err: unknown) => {
+      const status = err instanceof ApiError ? err.status : 0;
+      patch(id, {
+        phase: 'error',
+        error: err instanceof ApiError ? err.message : 'Upload failed.',
+        retryable: status === 0 || status >= 500,
+      });
+      set({ settled: state.settled + 1 });
+    },
+  );
+}
+
 /** Uploads live outside any view so they keep going while you look at something else. */
 export const uploads = {
-  start(files: Iterable<File>) {
+  /** Returns the ids of the uploads it started (or rejected), in order. */
+  start(files: Iterable<File>): string[] {
+    const ids: string[] = [];
     for (const file of files) {
       const id = `u${++seq}`;
+      ids.push(id);
       const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
       const kind = ACCEPT[ext];
       const base: Upload = {
@@ -69,25 +105,22 @@ export const uploads = {
         continue;
       }
       set({ items: [base, ...state.items] });
-      uploadFile(
-        file,
-        (progress) => patch(id, { progress }),
-        () => patch(id, { progress: 1, phase: 'sent' }),
-      ).then(
-        () => drop(id, true),
-        (err: unknown) => {
-          patch(id, {
-            phase: 'error',
-            error: err instanceof ApiError ? err.message : 'Upload failed.',
-          });
-          set({ settled: state.settled + 1 });
-        },
-      );
+      pending.set(id, { file, key: newKey() });
+      send(id);
     }
+    return ids;
+  },
+  /** Send a failed upload again with the same Idempotency-Key: if the first attempt did reach
+   *  the server, this returns that job rather than creating a duplicate. */
+  retry(id: string) {
+    if (!pending.has(id)) return;
+    patch(id, { phase: 'uploading', progress: 0, error: undefined, retryable: undefined });
+    send(id);
   },
   dismiss: (id: string) => drop(id),
   reset() {
     state.items.forEach((u) => u.preview && URL.revokeObjectURL(u.preview));
+    pending.clear();
     set({ items: [] });
   },
 };

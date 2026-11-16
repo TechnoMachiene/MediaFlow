@@ -20,10 +20,11 @@ sequenceDiagram
     participant R as Redis
     participant W as Worker
     participant G as Gemini
-    C->>A: POST /jobs (file)
+    C->>A: POST /jobs (file, Idempotency-Key)
+    A->>P: SELECT api_jobs by (workspace, owner, key): a retry? answer with that job
     A->>P: INSERT media_assets (lock row, bump last_used_at)
-    A->>P: INSERT api_jobs (status=queued, enqueued_at=NULL)  [1 durable intent]
-    A->>R: submit (job hash + LPUSH ready), idempotent per job id  [2 dispatch]
+    A->>P: INSERT api_jobs (status=queued, enqueued_at=NULL, key)  [1 durable intent]
+    A->>R: submit: job hash + marker + dedup + LPUSH, one Lua script  [2 dispatch]
     A->>P: UPDATE enqueued_at=now, cache_key
     W->>R: claim (RPOP ready + ZADD processing lease), atomic
     W-->>P: status=processing (best effort)
@@ -36,6 +37,40 @@ sequenceDiagram
 `api_jobs` is an **outbox**: the row is committed *before* Redis hears about the job, and
 `enqueued_at` records that the hand-off happened. Anything committed but not handed off is
 found and dispatched later. Nothing the API accepted can be silently lost.
+
+The commit in step 1 is the moment the job is accepted. If step 2 fails (Redis down, its reply
+lost, or the `enqueued_at` write fails), the API does **not** undo the row: Redis may in fact
+have the job, and deleting the row would leave it running with no record. It answers
+`202 queued` instead, and the job converges through the reconciler or the client's retry.
+
+## Submitting a job: idempotency
+
+`POST /jobs` takes an optional `Idempotency-Key` header (1–255 visible ASCII characters; the
+web app sends a fresh UUID per file and reuses it on retry).
+
+| Request | Answer |
+|---|---|
+| New key | A new job, as usual. |
+| Same key, same file (bytes and filename) | The **same job**: its current status and result, with `Idempotent-Replayed: true`. HTTP status follows the job (`200` done, `202` active or cancelled, `502` failed/dead). |
+| Same key, different file | `422`, nothing created. |
+| No key | A new job every time (dedup still avoids a second Gemini call for identical bytes). |
+
+How it holds under failure:
+
+- **The key lives on the row it created** (`api_jobs.idempotency_key`), under a unique index on
+  `(workspace_id, owner_id, idempotency_key)`. The key and the job are committed together, so
+  there is no window where one exists without the other, and no separate key store to expire
+  or lose. Keys are kept for the job's lifetime. They are scoped per user per workspace, so one
+  user's key can never reveal or return another user's job.
+- **Concurrent retries:** both requests may miss the lookup, but only one insert can pass the
+  unique index. The loser catches the conflict and answers with the winner's job.
+- **Retry of a job that never reached Redis** (`enqueued_at IS NULL`): the replay dispatches it
+  at once rather than waiting for the reconciler's grace period. Dispatch is atomic and
+  idempotent per job id, so racing the reconciler or the original request is harmless.
+- **Dispatch is one Lua script** (`SUBMIT_LUA` in `app/jobs.py`): the job hash, the per-job
+  `submitted` marker, dedup and the `LPUSH` either all happen or none do. A marker is only
+  trusted when the job hash also exists, so partial Redis loss re-enqueues the job instead of
+  reporting it as already submitted.
 
 ## States
 
@@ -50,7 +85,60 @@ found and dispatched later. Nothing the API accepted can be silently lost.
 | `dead` | worker | Exhausted `QUEUE_MAX_ATTEMPTS`. Id kept in `ma:dead` for inspection. |
 | `cancelled` | API | Cancelled before a worker claimed it. Final. |
 
-The database never moves a job out of `done` or `cancelled` (see `app/api/persistence.py`).
+### Allowed transitions
+
+These are the rules for `api_jobs.status`, enforced by `app/api/lifecycle.py`. Every write
+goes through them: the worker hooks apply them inside the `UPDATE ... WHERE status IN (...)`,
+so a late write loses the race safely, and the API and reconciler use `set_status`.
+`tests/unit/test_job_transitions.py` checks that this table matches the code.
+
+<!-- transitions:start -->
+| From | May become |
+|---|---|
+| `queued` | `waiting`, `processing`, `retrying`, `done`, `failed`, `dead`, `cancelled` |
+| `waiting` | `queued`, `processing`, `retrying`, `done`, `failed`, `dead`, `cancelled` |
+| `processing` | `queued`, `waiting`, `retrying`, `done`, `failed`, `dead`, `cancelled` |
+| `retrying` | `queued`, `waiting`, `processing`, `done`, `failed`, `dead`, `cancelled` |
+| `failed` | `done` |
+| `dead` | `done` |
+| `done` | (final) |
+| `cancelled` | (final) |
+<!-- transitions:end -->
+
+Why the active states are so permissive: the status hooks are best effort, so the row can skip
+states (`queued` straight to `dead` if `processing` was never recorded), and the reaper or
+reconciler legitimately moves a job back to `queued`. What matters is the right-hand side:
+
+- **`done` and `cancelled` are final.** Nothing reopens them.
+- **`failed` and `dead` accept only `done`.** Delivery is at-least-once, so a redelivered attempt
+  can finish after the first one gave up. A real result is kept, but a stale `processing` or
+  `retrying` from a worker whose lease expired can never bring a failed job back to life.
+- **`unknown` is never written.** It means Redis forgot the job; the row keeps its last
+  status, so it stays active and the reconciler recovers it.
+
+The normal path through Redis:
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: POST /jobs commits the row
+    queued --> waiting: identical media in flight
+    queued --> done: result cache hit
+    queued --> processing: worker claims
+    queued --> cancelled: DELETE /jobs/{id}
+    waiting --> done: leader finished
+    waiting --> failed: leader failed
+    processing --> done
+    processing --> retrying: transient error / 429
+    processing --> failed: permanent error
+    processing --> dead: attempts exhausted
+    processing --> queued: lease expired (reaper)
+    retrying --> processing
+    retrying --> cancelled
+    failed --> done: redelivered attempt finished
+    dead --> done: redelivered attempt finished
+    done --> [*]
+    cancelled --> [*]
+```
 
 ## Who keeps the stores in agreement
 
@@ -76,8 +164,8 @@ Run a sweep by hand with `python -m app.cli reconcile`.
 | # | Failure | State it leaves | Repair | Test (`tests/integration/test_lifecycle.py`) |
 |---|---|---|---|---|
 | 1 | API dies after committing the row, before Redis | Row `queued`, `enqueued_at NULL`, nothing in Redis | Reconciler dispatch sweep | `test_row_committed_but_never_dispatched_is_dispatched_by_reconciler` |
-| 2 | Redis unreachable during upload | Submit raises | Row deleted (compensation), client gets an error; if that delete also fails, case 1 applies | `test_redis_down_during_upload_rolls_the_row_back` |
-| 3 | Redis accepted the job, but the `enqueued_at` write was lost | Row `enqueued_at NULL`, job already queued | Re-dispatch is a no-op: `submit_prepared` keeps a per-job `submitted` key, so the job is never enqueued twice | `test_dispatch_is_idempotent_so_a_retried_dispatch_never_double_enqueues` |
+| 2 | Redis unreachable during upload | Submit raises; row `enqueued_at NULL` | Row kept, client gets `202 queued`; reconciler (or the client's keyed retry) dispatches once Redis is back. Cancelling still works | `test_redis_down_during_upload_keeps_the_job_in_the_outbox`, `test_job_accepted_while_redis_was_down_can_be_cancelled` |
+| 3 | Redis accepted the job, but the API never learned it (reply lost, or the `enqueued_at` commit failed) | Row `enqueued_at NULL`, job already queued | Re-dispatch is a no-op: the submit script sees the job's `submitted` marker and hash, so the job is never enqueued twice | `test_redis_reply_lost_after_it_accepted_the_job_never_double_enqueues`, `test_enqueued_at_commit_fails_after_redis_accepted`, `test_dispatch_is_idempotent_so_a_retried_dispatch_never_double_enqueues` |
 | 4 | Worker crashes holding a lease | Id in `processing`, lease expires | Reaper puts it back on `ready` | `test_worker_crash_mid_job_is_reaped_and_finished` |
 | 5 | PostgreSQL down when the result is written | Redis `done`, row not `done` | Job re-deferred; replayed from the result cache; acked only after the DB write | `test_result_write_failure_is_retried_without_a_second_gemini_call` |
 | 6 | Status hook fails | Row status stale | Ignored by the worker; reconciler sync copies the Redis status | `test_status_hook_failure_never_blocks_processing`, `test_terminal_state_missed_by_the_hooks_is_copied_by_reconciler` |
@@ -87,14 +175,23 @@ Run a sweep by hand with `python -m app.cli reconcile`.
 | 10 | Redis keeps losing the job | Repeated case 8 | After `max_recoveries` (3) the row becomes `failed` with a clear error, so it never loops forever | `test_recovery_is_bounded` |
 | 11 | Original purged or missing at re-dispatch | No media to send | Row becomes `failed` ("upload it again") instead of retrying | `test_job_whose_original_is_gone_fails_cleanly_instead_of_looping` |
 | 12 | Several workers reconcile at once | Duplicate sweeps | Redis lock elects one runner per sweep; per-row idempotency covers the rest | `test_only_one_reconciler_runs_a_sweep_at_a_time`, `test_concurrent_reconcilers_dispatch_each_job_once` |
+| 13 | Redis kept the `submitted` marker but lost the job hash | Marker says "already submitted", nothing to run | The marker counts only together with the hash, so re-dispatch enqueues it. Before this, re-dispatch raised on every sweep, stranding the job and aborting the rest of the sweep | `test_submitted_marker_without_job_hash_is_dispatched_not_stranded` |
+| 14 | Cancel reached Redis, but the API died before its commit | Redis `cancelled`, row active | Reconciler sync copies `cancelled` | `test_cancel_reached_redis_but_the_db_write_was_lost` |
+| 15 | A worker whose lease expired reports late (`processing`, `retrying`, …) | Hook would overwrite a final status | Transition guard in the `UPDATE` ignores it; only a real result may replace `failed`/`dead` | `test_late_status_hooks_cannot_move_a_job_out_of_a_final_state` |
+| 16 | Client never saw the response and retries | Possible duplicate job | Same `Idempotency-Key` → the same job, whatever state the first attempt reached: done, active, never dispatched, or Redis still down | `tests/integration/test_idempotency.py` |
+| 17 | Two retries with one key race | Both miss the lookup | The unique index lets one insert win; the other answers with its job | `test_concurrent_requests_with_one_key_create_one_job` |
 
 Failures that are not cross-store, such as Gemini errors, rate limits and dedup, are covered by
 `tests/integration/test_worker.py`, `test_e2e.py` and `test_jobs.py`.
 
 ## Guarantees and their limits
 
-- **No accepted job is lost.** Once `POST /jobs` returns, the job reaches a final status in
-  PostgreSQL, provided at least one worker with `DATABASE_URL` set is running.
+- **No accepted job is lost.** Once the `api_jobs` row commits (so certainly once `POST /jobs`
+  returns a `job_id`), the job reaches a final status in PostgreSQL, provided at least one
+  worker with `DATABASE_URL` set is running. Redis being down delays a job; it doesn't refuse
+  or lose it.
+- **One job per idempotency key.** A retried request never creates a second job, whichever
+  crash point the first attempt stopped at.
 - **At-least-once processing, mostly-once Gemini calls.** Cases 8 and 9 can hand a job to a
   worker a second time. If the first attempt finished, the second is answered from the result
   cache. Gemini is called twice only if Redis lost the result cache *and* the first attempt

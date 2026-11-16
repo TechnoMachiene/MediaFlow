@@ -15,8 +15,20 @@ from app.obs import tracing
 from app.redis_queue import ReliableQueue
 from app.system_prompt import SYSTEM_PROMPT
 
-# KEYS: result, inflight, job hash, ready list.  ARGV: job_id, inflight_ttl, now
+# One atomic step, so a crash or a lost reply can never leave a half-submitted job (a
+# `submitted` marker without a queue entry would make every retry a no-op and strand the job).
+# KEYS: result, inflight, job hash, ready list, submitted marker.
+# ARGV: job_id, inflight_ttl, now, job_ttl, force ('1'/'0'), then the job hash field/value pairs.
 SUBMIT_LUA = """
+if ARGV[5] ~= '1' and redis.call('EXISTS', KEYS[5]) == 1
+   and redis.call('EXISTS', KEYS[3]) == 1 then
+  return 'duplicate'
+end
+local fields = {}
+for i = 6, #ARGV do fields[#fields + 1] = ARGV[i] end
+redis.call('HSET', KEYS[3], unpack(fields))
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))
+redis.call('SET', KEYS[5], '1', 'EX', tonumber(ARGV[4]))
 if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('HSET', KEYS[3], 'status', 'done', 'cached', '1', 'updated_at', ARGV[3])
   return 'cached'
@@ -168,14 +180,48 @@ class JobStore:
 
         `media_ref` is what the worker receives (a path or an s3:// ref). `scope` partitions
         dedup and the result cache, so identical uploads in different workspaces never share
-        a Gemini call or reveal each other ("cached": true). Re-submitting the same `job_id`
-        is a no-op that returns the job's current status, which makes dispatch safe to retry;
-        `force=True` is for recovering a job whose Redis records were lost."""
+        a Gemini call or reveal each other ("cached": true). The whole submission (job hash,
+        `submitted` marker, dedup and LPUSH) is one Lua script, so it either happened or it
+        didn't. Re-submitting a `job_id` that Redis still holds is a no-op that returns its
+        current status, which makes dispatch safe to retry; `force=True` is for recovering a
+        job whose Redis records were lost."""
         ck = make_cache_key(sha256, prompt, self.model)
         if scope:
             ck = f"{scope}:{ck}"
         jid = job_id or uuid.uuid4().hex
-        if not self.r.set(self._submitted(jid), "1", nx=True, ex=self.job_ttl_s) and not force:
+        now = f"{time.time():.3f}"
+        fields = {
+            "user_id": str(user_id),
+            "path": media_ref,
+            "kind": kind,
+            "mime": mime,
+            "prompt": prompt,
+            "prompt_hash": prompt_hash(prompt),
+            "model": self.model,
+            "sha256": sha256,
+            "cache_key": ck,
+            "status": "new",
+            "attempts": 0,
+            "cached": 0,
+            "error": "",
+            "created_at": now,
+            "updated_at": now,
+            # Carried to the worker so its logs and spans join the originating request.
+            "request_id": obs_context.get("request_id") or "",
+            "trace": json.dumps(tracing.inject()),
+        }
+        status = self._submit(
+            keys=[
+                self._result(ck), self._inflight(ck), self._job(jid), self.queue.ready,
+                self._submitted(jid),
+            ],
+            args=[
+                jid, self.inflight_ttl_s, now, self.job_ttl_s, "1" if force else "0",
+                *(item for pair in fields.items() for item in pair),
+            ],
+        )
+        status = status.decode() if isinstance(status, bytes) else status
+        if status == "duplicate":
             current = self.status(jid)
             return {
                 "job_id": jid,
@@ -184,41 +230,6 @@ class JobStore:
                 "cached": current["cached"],
                 "duplicate": True,
             }
-        if force:
-            self.r.set(self._submitted(jid), "1", ex=self.job_ttl_s)
-        now = f"{time.time():.3f}"
-        # job hash must exist BEFORE its id can reach the ready list
-        pipe = self.r.pipeline(transaction=True)
-        pipe.hset(
-            self._job(jid),
-            mapping={
-                "user_id": str(user_id),
-                "path": media_ref,
-                "kind": kind,
-                "mime": mime,
-                "prompt": prompt,
-                "prompt_hash": prompt_hash(prompt),
-                "model": self.model,
-                "sha256": sha256,
-                "cache_key": ck,
-                "status": "new",
-                "attempts": 0,
-                "cached": 0,
-                "error": "",
-                "created_at": now,
-                "updated_at": now,
-                # Carried to the worker so its logs and spans join the originating request.
-                "request_id": obs_context.get("request_id") or "",
-                "trace": json.dumps(tracing.inject()),
-            },
-        )
-        pipe.expire(self._job(jid), self.job_ttl_s)
-        pipe.execute()
-        status = self._submit(
-            keys=[self._result(ck), self._inflight(ck), self._job(jid), self.queue.ready],
-            args=[jid, self.inflight_ttl_s, now],
-        )
-        status = status.decode() if isinstance(status, bytes) else status
         return {
             "job_id": jid,
             "status": "done" if status == "cached" else status,

@@ -33,9 +33,12 @@ def store_media_asset(
     staged_path: Path,
     original_filename: str,
     storage: MediaStorage,
+    *,
+    sha256: str | None = None,
 ) -> MediaAsset:
-    """Register `staged_path` and return its asset row. The staged file may be consumed."""
-    sha256 = _sha256(staged_path)
+    """Register `staged_path` and return its asset row. The staged file may be consumed.
+    Pass `sha256` when the caller already hashed the bytes (e.g. while streaming them)."""
+    sha256 = sha256 or _sha256(staged_path)
     now = datetime.now(timezone.utc)
 
     asset = db.scalar(select(MediaAsset).where(MediaAsset.sha256 == sha256).with_for_update())

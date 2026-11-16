@@ -144,9 +144,12 @@ export interface UploadOutcome {
   jobId: string | null;
 }
 
-/** POST /jobs with byte-level progress. The response can take minutes: the API waits for Gemini. */
+/** POST /jobs with byte-level progress. The response can take minutes: the API waits for Gemini.
+ *  `idempotencyKey` must stay the same across retries of one file, so a retry after a lost
+ *  response returns the job the first attempt created instead of making a second one. */
 export function uploadFile(
   file: File,
+  idempotencyKey: string,
   onProgress: (fraction: number) => void,
   onSent: () => void,
 ): Promise<UploadOutcome> {
@@ -154,6 +157,7 @@ export function uploadFile(
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE}/jobs`);
     for (const [name, value] of Object.entries(authHeaders())) xhr.setRequestHeader(name, value);
+    xhr.setRequestHeader('Idempotency-Key', idempotencyKey);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.upload.onload = onSent;
     xhr.onerror = () => reject(new ApiError(0, OFFLINE));

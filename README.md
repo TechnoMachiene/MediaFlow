@@ -417,7 +417,7 @@ protected super-admin account cannot be modified or deleted through the API. Wit
 
 | Method and path | Access | Purpose |
 |---|---|---|
-| `POST /jobs` | Authenticated | Upload an image/video as multipart field `file` and enqueue analysis. |
+| `POST /jobs` | Authenticated | Upload an image/video as multipart field `file` and enqueue analysis. Send an `Idempotency-Key` header (e.g. a UUID) to make retries safe: the same key and file return the original job. |
 | `GET /jobs/mine` | Authenticated | List the caller's jobs with processing and approval statuses; supports `limit` and `offset`. |
 | `GET /jobs/{job_id}` | Owner/manager/admin | Get a job's current status and result; non-admins can access their own jobs. |
 | `DELETE /jobs/{job_id}` | Owner/manager/admin | Cancel an owned job when it has not started processing. |

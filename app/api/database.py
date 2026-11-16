@@ -91,13 +91,20 @@ class MediaAsset(Base):
 
 class ApiJob(Base):
     """Durable job record. It doubles as the outbox entry for the Redis queue:
-    `enqueued_at IS NULL` means the job was accepted but not yet handed to Redis."""
+    `enqueued_at IS NULL` means the job was accepted but not yet handed to Redis.
+
+    `idempotency_key` is the client's `Idempotency-Key` header, unique per (workspace, owner),
+    so a retried upload returns the original job instead of creating a second one. NULLs are
+    distinct, so uploads without a key are unaffected."""
 
     __tablename__ = "api_jobs"
     __table_args__ = (
         Index("ix_api_jobs_owner_created", "owner_id", "created_at"),
         Index("ix_api_jobs_workspace_created", "workspace_id", "created_at"),
         Index("ix_api_jobs_status_updated", "status", "updated_at"),
+        Index(
+            "uq_api_jobs_idempotency", "workspace_id", "owner_id", "idempotency_key", unique=True
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -120,6 +127,7 @@ class ApiJob(Base):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     recoveries: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

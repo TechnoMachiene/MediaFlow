@@ -1,4 +1,8 @@
-"""Worker -> PostgreSQL writes. Redis is the working copy; these make the database durable."""
+"""Worker -> PostgreSQL writes. Redis is the working copy; these make the database durable.
+
+Both writes are guarded by the transition table in app/api/lifecycle.py inside the UPDATE
+itself, so a late hook (a slow worker whose lease expired, a replayed attempt) can never move a
+row out of a final state, even when it races another writer."""
 
 from __future__ import annotations
 
@@ -9,9 +13,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.api.database import ApiJob
-
-# A status write must never move a job backwards out of these.
-FINAL = ("done", "cancelled")
+from app.api.lifecycle import allowed_from
 
 
 def persist_api_result(session_factory: Callable[[], Session], job_id: str, result: dict) -> None:
@@ -23,11 +25,9 @@ def persist_api_result(session_factory: Callable[[], Session], job_id: str, resu
         statement = update(ApiJob).where(ApiJob.id == job_id)
         if row.cache_key is not None:
             # cache_key is workspace-scoped, so followers in other tenants are never touched.
-            statement = update(ApiJob).where(
-                ApiJob.cache_key == row.cache_key, ApiJob.status != "cancelled"
-            )
+            statement = update(ApiJob).where(ApiJob.cache_key == row.cache_key)
         db.execute(
-            statement.values(
+            statement.where(ApiJob.status.in_(allowed_from("done"))).values(
                 result=result, status="done", error=None, updated_at=datetime.now(timezone.utc)
             )
         )
@@ -39,7 +39,7 @@ def persist_api_status(
     with session_factory.begin() as db:
         db.execute(
             update(ApiJob)
-            .where(ApiJob.id == job_id, ApiJob.status.not_in(FINAL))
+            .where(ApiJob.id == job_id, ApiJob.status.in_(allowed_from(status)))
             .values(
                 status=status,
                 error=(error or None) and error[:500],

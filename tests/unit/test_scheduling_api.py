@@ -89,7 +89,7 @@ def scheduling_api(tmp_path):
                     owner_id=owner_id,
                     filename=f"{job_id}.png",
                     media_kind="image",
-                    status="done",
+                    status="queued" if job_id == "queued-job" else "done",
                     approval_status=approval_status,
                     result=(
                         None

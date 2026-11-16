@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import (
     APIRouter,
     File,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -42,6 +44,7 @@ from app.api.dependencies import (
     Storage,
     effective_role,
 )
+from app.api.lifecycle import set_status
 from app.api.media_storage import locate_job_media, store_media_asset
 from app.api.reconcile import dispatch_job
 from app.api.roles import (
@@ -88,6 +91,8 @@ JOB_RESULT_WAIT_S = 5 * 60
 JOB_RESULT_POLL_S = 0.25
 WORKER_GRACE_S = 1.0     # a just-started worker gets this long to send its first heartbeat
 WORKER_RECHECK_S = 2.0   # then liveness is re-checked, so a worker dying mid-wait is noticed
+# Visible ASCII, as in the IETF Idempotency-Key draft's examples; a UUID v4 is the usual choice.
+IDEMPOTENCY_KEY_PATTERN = r"^[\x21-\x7e]{1,255}$"
 
 
 def _token(request: Request, user: User) -> TokenResponse:
@@ -417,9 +422,10 @@ def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) ->
         result = row.result
     if result is not None:
         live_status = "done"
-    row.status = live_status
-    if result is not None:
         row.result = result
+    # Guarded: Redis can't move a row out of a final state (see app/api/lifecycle.py).
+    set_status(row, live_status)
+    live_status = row.status
     return JobView(
         job_id=row.id,
         status=live_status,
@@ -470,6 +476,19 @@ def upload_job(
     db: DbSession,
     runtime: QueueRuntime,
     storage: Storage,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            pattern=IDEMPOTENCY_KEY_PATTERN,
+            description=(
+                "Optional client-chosen key (e.g. a UUID). Retrying with the same key and the "
+                "same file returns the job the first request created instead of a new one; "
+                "the response then carries `Idempotent-Replayed: true`. Reusing a key for a "
+                "different file is rejected with 422."
+            ),
+        ),
+    ] = None,
 ):
     original_name = (file.filename or "upload").replace("\\", "/").rsplit("/", 1)[-1]
     suffix = Path(original_name).suffix.lower()
@@ -485,11 +504,13 @@ def upload_job(
         settings.max_image_mb if kind == "image" else settings.max_video_upload_mb
     ) * 1024 * 1024
     job_id = uuid.uuid4().hex
+    filename = original_name[:255]
     staging_dir: Path = request.app.state.api_settings.media_storage_dir
     staging_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     staged_path = staging_dir / f".upload-{uuid.uuid4().hex}{suffix}"
 
     size = 0
+    digest = hashlib.sha256()
     try:
         with staged_path.open("xb") as target:
             while chunk := file.file.read(1024 * 1024):
@@ -499,84 +520,75 @@ def upload_job(
                         status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         "Upload exceeds the configured size limit",
                     )
+                digest.update(chunk)
                 target.write(chunk)
         os.chmod(staged_path, 0o600)
         if size == 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Uploaded file is empty")
+        sha256 = digest.hexdigest()
+
+        # A retry of a request we already accepted: answer with that job, never a second one.
+        if idempotency_key is not None:
+            existing = _keyed_job(db, user, idempotency_key)
+            if existing is not None:
+                return _replay(existing, sha256, filename, response, db, runtime, storage)
+
         inspect_media(
             str(staged_path),
             max_image_mb=settings.max_image_mb,
             max_video_mb=settings.max_video_upload_mb,
         )
 
-        asset = store_media_asset(db, staged_path, original_name, storage)
+        asset = store_media_asset(db, staged_path, original_name, storage, sha256=sha256)
 
         # Step 1 (durable intent): the row is committed before Redis hears of the job, with
-        # enqueued_at NULL. If this process dies after the commit, the reconciler dispatches it.
+        # enqueued_at NULL. From this commit on the job is accepted: if anything below fails
+        # or this process dies, the reconciler dispatches it (api_jobs is the outbox).
         row = ApiJob(
             id=job_id,
             workspace_id=user.workspace_id,
             owner_id=user.id,
             media_sha256=asset.sha256,
-            filename=original_name[:255],
+            filename=filename,
             media_kind=kind,
             status="queued",
+            idempotency_key=idempotency_key,
         )
         db.add(row)
-        db.commit()
-        # Step 2 (dispatch): hand it to Redis and record enqueued_at. Idempotent per job id.
+        try:
+            db.commit()
+        except IntegrityError:
+            # Only the idempotency index can collide (ids are random): a concurrent request
+            # with the same key committed first. Theirs is the job; answer with it.
+            db.rollback()
+            existing = _keyed_job(db, user, idempotency_key) if idempotency_key else None
+            if existing is None:
+                raise
+            return _replay(existing, sha256, filename, response, db, runtime, storage)
+
+        # Step 2 (dispatch): hand it to Redis and record enqueued_at. Atomic and idempotent
+        # per job id, so a retry (ours, a replay's or the reconciler's) never double-enqueues.
         try:
             result = dispatch_job(db, row, runtime.store, storage)
             db.commit()
         except Exception:
+            # Redis down, its reply lost, or the enqueued_at write failed. Either Redis has the
+            # job or the row still says enqueued_at NULL; both converge. No compensating delete:
+            # Redis may in fact have the job, and the client must not be told it was refused.
             db.rollback()
-            JOBS_ACCEPTED.labels("dispatch_failed").inc()
-            log.exception("could not hand job to the queue", extra={"job_id": job_id})
-            # Best-effort compensation; if this fails too, the reconciler will dispatch it.
-            db.execute(delete(ApiJob).where(ApiJob.id == job_id))
-            db.commit()
-            raise
+            JOBS_ACCEPTED.labels("dispatch_deferred").inc()
+            log.warning(
+                "could not hand job to the queue; the reconciler will dispatch it",
+                exc_info=True, extra={"job_id": job_id},
+            )
+            return JobResponse(job_id=job_id, status="queued")
         JOBS_ACCEPTED.labels(result["status"]).inc()
         log.info(
             "job accepted",
             extra={"job_id": job_id, "dispatch": result["status"], "kind": kind, "bytes": size},
         )
-
-        # Wait briefly for the result, but only while some worker is consuming the queue:
-        # with none alive, holding the request open for minutes helps nobody. The job stays
-        # safely queued either way, and the client gets 202 to poll.
-        deadline = time.monotonic() + JOB_RESULT_WAIT_S
-        next_liveness_check = time.monotonic() + WORKER_GRACE_S
-        job_status = runtime.store.status(job_id)
-        while (
-            job_status["status"] in ACTIVE_STATUSES
-            and time.monotonic() < deadline
-        ):
-            if time.monotonic() >= next_liveness_check:
-                if runtime.queue.live_workers() == 0:
-                    log.warning("no live worker; not waiting for the result",
-                                extra={"job_id": job_id})
-                    break
-                next_liveness_check = time.monotonic() + WORKER_RECHECK_S
-            time.sleep(min(JOB_RESULT_POLL_S, max(0, deadline - time.monotonic())))
-            job_status = runtime.store.status(job_id)
-
-        db.refresh(row)
-        if row.status != "done":
-            row.status = job_status["status"]
-        row.result = row.result or job_status.get("result")
-        db.commit()
-        if job_status["status"] == "done":
-            response.status_code = status.HTTP_200_OK
-        elif job_status["status"] in {"failed", "dead"}:
-            response.status_code = status.HTTP_502_BAD_GATEWAY
-        return JobResponse(
-            job_id=job_id,
-            status=job_status["status"],
-            cached=job_status.get("cached", result["cached"]),
-            result=row.result,
-            error=job_status.get("error"),
-        )
+        return _respond(row, _await_result(runtime, job_id), response, db,
+                        cached=result["cached"])
     except MediaError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
@@ -587,6 +599,92 @@ def upload_job(
         file.file.close()
         if staged_path.exists():
             staged_path.unlink()
+
+
+def _keyed_job(db: Session, user: Member, key: str) -> ApiJob | None:
+    return db.scalar(
+        select(ApiJob).where(
+            ApiJob.workspace_id == user.workspace_id,
+            ApiJob.owner_id == user.id,
+            ApiJob.idempotency_key == key,
+        )
+    )
+
+
+def _replay(
+    row: ApiJob, sha256: str, filename: str, response: Response, db: Session, runtime, storage
+) -> JobResponse:
+    """Answer a retried upload with the job its first attempt created."""
+    if (row.media_sha256, row.filename) != (sha256, filename):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This Idempotency-Key was already used for a different upload",
+        )
+    response.headers["Idempotent-Replayed"] = "true"
+    JOBS_ACCEPTED.labels("replayed").inc()
+    log.info("idempotent replay", extra={"job_id": row.id})
+    if row.enqueued_at is None and row.status in ACTIVE_STATUSES:
+        # The first attempt never reached Redis (or never recorded that it did). The client is
+        # here now, so dispatch instead of waiting for the reconciler. Safe to race it.
+        try:
+            dispatch_job(db, row, runtime.store, storage)
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.warning("replay could not dispatch; the reconciler will",
+                        exc_info=True, extra={"job_id": row.id})
+            response.status_code = status.HTTP_202_ACCEPTED
+            return JobResponse(job_id=row.id, status=row.status, error=row.error)
+    return _respond(row, _await_result(runtime, row.id), response, db)
+
+
+def _await_result(runtime, job_id: str) -> dict:
+    """Wait briefly for the result, but only while some worker is consuming the queue: with
+    none alive, holding the request open for minutes helps nobody. The job stays safely queued
+    either way, and the client gets 202 to poll. A Redis error ends the wait early."""
+    deadline = time.monotonic() + JOB_RESULT_WAIT_S
+    next_liveness_check = time.monotonic() + WORKER_GRACE_S
+    try:
+        job_status = runtime.store.status(job_id)
+        while job_status["status"] in ACTIVE_STATUSES and time.monotonic() < deadline:
+            if time.monotonic() >= next_liveness_check:
+                if runtime.queue.live_workers() == 0:
+                    log.warning("no live worker; not waiting for the result",
+                                extra={"job_id": job_id})
+                    break
+                next_liveness_check = time.monotonic() + WORKER_RECHECK_S
+            time.sleep(min(JOB_RESULT_POLL_S, max(0, deadline - time.monotonic())))
+            job_status = runtime.store.status(job_id)
+    except Exception:
+        log.warning("could not read job status; answering from the database",
+                    exc_info=True, extra={"job_id": job_id})
+        return {"status": "unknown"}
+    return job_status
+
+
+def _respond(row: ApiJob, job_status: dict, response: Response, db: Session, *,
+             cached: bool = False) -> JobResponse:
+    """Fold the live Redis state into the row (guarded) and pick the HTTP status from it."""
+    db.refresh(row)
+    if row.result is None and job_status.get("result") is not None:
+        row.result = job_status["result"]
+    live = "done" if row.result is not None else job_status["status"]
+    if live != "unknown":
+        set_status(row, live)
+    db.commit()
+    if row.status == "done":
+        response.status_code = status.HTTP_200_OK
+    elif row.status in {"failed", "dead"}:
+        response.status_code = status.HTTP_502_BAD_GATEWAY
+    else:
+        response.status_code = status.HTTP_202_ACCEPTED
+    return JobResponse(
+        job_id=row.id,
+        status=row.status,
+        cached=job_status.get("cached", cached),
+        result=row.result,
+        error=None if row.status == "done" else (job_status.get("error") or row.error),
+    )
 
 
 def _require_reviewer(user: Member) -> None:
@@ -767,6 +865,19 @@ def get_job(job_id: str, user: CurrentMember, db: DbSession, runtime: QueueRunti
 @router.delete("/jobs/{job_id}", response_model=JobView)
 def cancel_job(job_id: str, user: CurrentMember, db: DbSession, runtime: QueueRuntime):
     row = _workspace_job(db, user, job_id, any_owner=is_admin(user))
+    if row.enqueued_at is None and row.status in ACTIVE_STATUSES:
+        # Accepted but not yet handed to Redis: cancel it in the outbox. The row lock orders
+        # this against a concurrent dispatch; whichever commits first wins.
+        pending = db.scalar(
+            select(ApiJob)
+            .where(ApiJob.id == job_id, ApiJob.enqueued_at.is_(None))
+            .with_for_update()
+        )
+        if pending is not None and set_status(pending, "cancelled"):
+            pending.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            return _job_view(pending, {"status": "cancelled"})
+        db.rollback()
     if not runtime.store.cancel(job_id):
         raise HTTPException(
             status.HTTP_409_CONFLICT,

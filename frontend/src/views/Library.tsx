@@ -41,6 +41,11 @@ function UploadTile({ upload }: { upload: Upload }) {
         {failed ? (
           <>
             <span className="tile-sub tile-error" role="alert">{upload.error}</span>
+            {upload.retryable && (
+              <button type="button" className="link" onClick={() => uploads.retry(upload.id)}>
+                Retry
+              </button>
+            )}
             <button type="button" className="link" onClick={() => uploads.dismiss(upload.id)}>
               Dismiss
             </button>
