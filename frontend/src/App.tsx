@@ -1,15 +1,16 @@
 import { MotionConfig } from 'motion/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, auth, clearMedia } from './api';
+import { ApiError, api, auth, clearMedia } from './api';
 import { isAdmin, isReviewer, roleLabel } from './lib';
 import { SessionContext, useSession } from './session';
 import { Sheet } from './Sheet';
 import { ToastProvider } from './toast';
 import type { Me, Meta, User } from './types';
-import { Button, Icon, Spinner, type IconName } from './ui';
+import { Button, ConfirmButton, ErrorNote, Icon, Spinner, type IconName } from './ui';
 import { uploads } from './uploads';
 import { Activity } from './views/Activity';
 import { Calendar } from './views/Calendar';
+import { AcceptInvite, readInviteToken } from './views/Invite';
 import { Library } from './views/Library';
 import { Login } from './views/Login';
 import { Review } from './views/Review';
@@ -32,6 +33,13 @@ export default function App() {
   const [meta, setMeta] = useState<Meta>(NO_META);
   const [booting, setBooting] = useState(auth.token !== null);
   const [notice, setNotice] = useState('');
+  const [invite, setInvite] = useState(readInviteToken);
+
+  useEffect(() => {
+    const onHash = () => setInvite(readInviteToken());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   useEffect(() => {
     api<Meta>('GET', '/meta').then(setMeta, () => {});
@@ -83,6 +91,12 @@ export default function App() {
         )}
         {booting ? (
           <div className="boot"><Spinner /></div>
+        ) : invite ? (
+          <AcceptInvite
+            token={invite} user={user} onSignOut={signOut}
+            onJoined={(u) => { setInvite(null); setNotice(''); setUser(u); }}
+            onLeave={() => { window.history.replaceState(null, '', '#/'); setInvite(null); }}
+          />
         ) : session ? (
           <SessionContext.Provider value={session}>
             {/* Remount every view when the workspace changes so no tenant's data lingers. */}
@@ -183,10 +197,42 @@ function Shell({ user, signOut }: { user: Me; signOut: () => void }) {
           <strong>{user.email}</strong>
           <span className="quiet">{roleLabel[user.role]}</span>
           <SwitcherFromSession user={user} />
+          <LeaveWorkspace user={user} />
           <Button onClick={signOut}>Sign out</Button>
         </div>
       </Sheet>
     </div>
+  );
+}
+
+/** Only offered when you belong to another workspace too; the server enforces the same rules. */
+export function LeaveWorkspace({ user }: { user: Me }) {
+  const { switchWorkspace } = useSession();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const next = user.workspaces.find((w) => w.id !== user.workspace.id);
+  if (!next) return null;
+
+  async function leave() {
+    setBusy(true);
+    setError('');
+    try {
+      await api<void>('POST', `/workspaces/${user.workspace.id}/leave`);
+      switchWorkspace(next!.id);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not leave the workspace.');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <ConfirmButton
+        label={`Leave ${user.workspace.name}`} confirm="Leave? Your work stays with them"
+        busy={busy} onConfirm={() => void leave()}
+      />
+      {error && <ErrorNote message={error} />}
+    </>
   );
 }
 

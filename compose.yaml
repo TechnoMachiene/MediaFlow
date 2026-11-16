@@ -32,6 +32,7 @@ x-app: &app
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-30}
     ALLOW_SIGNUP: ${ALLOW_SIGNUP:-0}
+    INVITATION_TTL_HOURS: ${INVITATION_TTL_HOURS:-168}
     EMBEDDED_WORKER: "0"
     DEMO_MODE: "0"              # the demo has its own file: compose.demo.yaml
     LOG_FORMAT: ${LOG_FORMAT:-json}

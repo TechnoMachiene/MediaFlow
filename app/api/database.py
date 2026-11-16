@@ -72,6 +72,39 @@ class WorkspaceMember(Base):
     )
 
 
+class WorkspaceInvitation(Base):
+    """An invitation for one email address to join one workspace with one role.
+
+    Only the SHA-256 of the token is stored; the token itself is shown once, to the inviter.
+    The state is derived: accepted (accepted_at), revoked (revoked_at), expired (expires_at in
+    the past), otherwise pending. Acceptance is a guarded UPDATE, so a token works once."""
+
+    __tablename__ = "workspace_invitations"
+    __table_args__ = (
+        Index("ix_workspace_invitations_workspace_email", "workspace_id", "email"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    invited_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class MediaAsset(Base):
     __tablename__ = "media_assets"
 

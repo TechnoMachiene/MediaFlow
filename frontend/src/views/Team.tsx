@@ -4,9 +4,10 @@ import { fmt, isAdmin, roleLabel } from '../lib';
 import { Sheet } from '../Sheet';
 import { useSession } from '../session';
 import { useToast } from '../toast';
-import type { Page, Role, User } from '../types';
+import type { AssignableRole, CreatedInvitation, Invitation, Page, Role, User } from '../types';
 import {
-  Badge, Button, ConfirmButton, Empty, ErrorNote, Field, Icon, PageHeader, Spinner, useLast,
+  Badge, Button, ConfirmButton, CopyButton, Empty, ErrorNote, Field, Icon, PageHeader, Spinner,
+  useLast,
 } from '../ui';
 
 type Editing = { mode: 'create' } | { mode: 'edit'; user: User };
@@ -42,19 +43,30 @@ export function Team() {
     void load();
   }, [load]);
 
+  const [inviting, setInviting] = useState(false);
+  const [invites, setInvites] = useState<Invitation[]>([]);
+  const loadInvites = useCallback(() => {
+    api<Invitation[]>('GET', '/invitations').then(setInvites, () => {});
+  }, []);
+  useEffect(loadInvites, [loadInvites]);
+
   return (
     <div className="page">
-      <PageHeader title="Team" subtitle="People who can sign in to MediaFlow">
-        <Button variant="primary" onClick={() => setEditing({ mode: 'create' })}>
-          <Icon name="plus" /> Add person
+      <PageHeader title="Team" subtitle={`People in ${me.workspace.name}`}>
+        <Button onClick={() => setEditing({ mode: 'create' })}>
+          <Icon name="plus" /> Create account
+        </Button>
+        <Button variant="primary" onClick={() => setInviting(true)}>
+          <Icon name="person" /> Invite
         </Button>
       </PageHeader>
       <div className="page-body narrow">
         {error && <ErrorNote message={error} onRetry={() => load()} />}
+        <PendingInvites invites={invites} onChanged={loadInvites} />
         {!admin && (
-          <Empty icon="team" title="Add people to your team">
-            As a manager you can create member and manager accounts. Only admins can see and edit
-            the full list.
+          <Empty icon="team" title="Grow your team">
+            As a manager you can invite members and managers. Only admins can see and edit the
+            full list.
           </Empty>
         )}
         {admin && users === null && !error && <div className="center"><Spinner /></div>}
@@ -84,7 +96,132 @@ export function Team() {
         )}
       </div>
       <UserSheet editing={editing} onClose={() => setEditing(null)} onSaved={() => load(users?.length || 100)} />
+      <Sheet open={inviting} onClose={() => setInviting(false)} title="Invite someone">
+        {inviting && <InviteForm onClose={() => setInviting(false)} onSent={loadInvites} />}
+      </Sheet>
     </div>
+  );
+}
+
+function PendingInvites({ invites, onChanged }: { invites: Invitation[]; onChanged: () => void }) {
+  const { user: me } = useSession();
+  const toast = useToast();
+  const [busy, setBusy] = useState('');
+  if (invites.length === 0) return null;
+
+  async function revoke(invite: Invitation) {
+    setBusy(invite.id);
+    try {
+      await api<void>('DELETE', `/invitations/${invite.id}`);
+      toast(`Invitation for ${invite.email} withdrawn`);
+      onChanged();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : 'Could not withdraw the invitation.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  return (
+    <section aria-labelledby="pending-title">
+      <h2 id="pending-title" className="section-title">Invited, not joined yet</h2>
+      <ul className="rows">
+        {invites.map((invite) => (
+          <li key={invite.id} className="row">
+            <span className="avatar" aria-hidden="true">{invite.email[0].toUpperCase()}</span>
+            <span className="row-main">
+              <span className="row-title">{invite.email}</span>
+              <span className="row-sub">
+                {roleLabel[invite.role]} · expires {fmt.date(invite.expires_at)}
+                {invite.invited_by_email && ` · by ${invite.invited_by_email}`}
+              </span>
+            </span>
+            <span className="row-side">
+              {(invite.role !== 'admin' || isAdmin(me.role)) && (
+                <ConfirmButton
+                  label="Withdraw" confirm="Withdraw invite"
+                  busy={busy === invite.id} onConfirm={() => void revoke(invite)}
+                />
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function InviteForm({ onClose, onSent }: { onClose: () => void; onSent: () => void }) {
+  const { user: me } = useSession();
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState<AssignableRole>('user');
+  const [touched, setTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [sent, setSent] = useState<CreatedInvitation | null>(null);
+
+  const roles: AssignableRole[] = isAdmin(me.role) ? ['user', 'manager', 'admin'] : ['user', 'manager'];
+  const emailError = !EMAIL.test(email.trim()) ? 'Enter a valid email address.' : '';
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setTouched(true);
+    if (emailError) return;
+    setBusy(true);
+    setError('');
+    try {
+      setSent(await api<CreatedInvitation>('POST', '/invitations', { email: email.trim(), role }));
+      onSent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Something went wrong.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (sent) {
+    const link = `${window.location.origin}${sent.accept_path}`;
+    return (
+      <div className="form">
+        <p>
+          Send this link to <strong>{sent.email}</strong>. It works once, expires{' '}
+          {fmt.date(sent.expires_at)}, and is shown only now.
+        </p>
+        <Field label="Invitation link">
+          <input readOnly value={link} onFocus={(e) => e.currentTarget.select()} />
+        </Field>
+        <div className="form-actions">
+          <CopyButton text={link} label="Copy link" />
+          <span className="spacer" />
+          <Button variant="primary" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form className="form" onSubmit={submit} noValidate>
+      <Field label="Email" error={touched ? emailError : ''}>
+        <input
+          type="email" autoComplete="off" value={email} required autoFocus
+          onChange={(e) => setEmail(e.target.value)} onBlur={() => setTouched(true)}
+        />
+      </Field>
+      <Field label="Role" hint={ROLE_HINT[role]}>
+        <select value={role} onChange={(e) => setRole(e.target.value as AssignableRole)}>
+          {roles.map((r) => <option key={r} value={r}>{roleLabel[r]}</option>)}
+        </select>
+      </Field>
+      <p className="field-hint">
+        They choose their own password, or sign in if they already use MediaFlow in another workspace.
+      </p>
+      {error && <ErrorNote message={error} />}
+      <div className="form-actions">
+        <span className="spacer" />
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" type="submit" busy={busy}>Create invitation link</Button>
+      </div>
+    </form>
   );
 }
 
@@ -92,7 +229,7 @@ function UserSheet({
   editing: current, onClose, onSaved,
 }: { editing: Editing | null; onClose: () => void; onSaved: () => void }) {
   const editing = useLast(current);
-  const title = editing?.mode === 'edit' ? editing.user.email : 'Add person';
+  const title = editing?.mode === 'edit' ? editing.user.email : 'Create account';
   return (
     <Sheet open={current !== null} onClose={onClose} title={title}>
       {editing && (
@@ -217,7 +354,7 @@ function UserForm({
         <span className="spacer" />
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" type="submit" busy={busy === 'save'}>
-          {target ? 'Save' : 'Add person'}
+          {target ? 'Save' : 'Create account'}
         </Button>
       </div>
     </form>

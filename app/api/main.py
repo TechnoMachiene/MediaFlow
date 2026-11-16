@@ -22,6 +22,7 @@ from app.api.database import (
 )
 from app.api.routes import router
 from app.api.worker_setup import configure_worker
+from app.api.workspaces import router as workspaces_router
 from app.config import Settings
 from app.obs import metrics
 from app.obs.http import ObservabilityMiddleware
@@ -102,6 +103,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.include_router(router)
+    application.include_router(workspaces_router)
     # Order matters: tracing is added last so it is outermost, and the access log written by
     # ObservabilityMiddleware happens inside the request span (and so carries its trace_id).
     application.add_middleware(ObservabilityMiddleware)

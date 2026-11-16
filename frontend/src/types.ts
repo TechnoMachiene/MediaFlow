@@ -22,6 +22,37 @@ export interface Me extends User {
   platform_admin: boolean;
 }
 
+export type AssignableRole = Exclude<Role, 'super_admin'>;
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: AssignableRole;
+  status: 'pending' | 'accepted' | 'revoked' | 'expired';
+  invited_by_email: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+/** Returned once, to the inviter: the token is never shown again. */
+export interface CreatedInvitation extends Invitation {
+  token: string;
+  accept_path: string;
+}
+
+export interface InvitationPreview {
+  workspace_name: string;
+  email: string;
+  role: AssignableRole;
+  expires_at: string;
+  account_exists: boolean;
+}
+
+export interface InvitationAccepted {
+  access_token: string;
+  workspace: WorkspaceRef;
+}
+
 export interface Meta {
   demo_mode: boolean;
   allow_signup: boolean;

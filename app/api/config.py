@@ -37,6 +37,8 @@ class ApiSettings:
     media_retention_days: int = 30
     # Self-serve sign-up: anyone can create an account plus their own workspace.
     allow_signup: bool = False
+    # How long an invitation link stays valid.
+    invitation_ttl_hours: int = 168
     # Run a queue worker inside the API process (handy for development and demos).
     embedded_worker: bool = False
     demo_mode: bool = False
@@ -82,6 +84,7 @@ class ApiSettings:
             s3_region=os.environ.get("S3_REGION", "").strip(),
             media_retention_days=_int("MEDIA_RETENTION_DAYS", 30, 0, 36500),
             allow_signup=env_flag("ALLOW_SIGNUP", default=demo),
+            invitation_ttl_hours=_int("INVITATION_TTL_HOURS", 168, 1, 720),
             embedded_worker=env_flag("EMBEDDED_WORKER", default=demo),
             demo_mode=demo,
         )

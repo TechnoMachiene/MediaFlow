@@ -58,6 +58,17 @@ def current_user(
     return user
 
 
+def optional_user(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    db: Annotated[Session, Depends(get_db)],
+) -> User | None:
+    """The caller if they sent a token (which must then be valid), otherwise None."""
+    if credentials is None:
+        return None
+    return current_user(request, credentials, db)
+
+
 @dataclass(frozen=True)
 class Member:
     """The caller acting inside one workspace. `role` is their role *in that workspace*
@@ -118,6 +129,7 @@ def current_member(
 
 DbSession = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(current_user)]
+OptionalUser = Annotated[User | None, Depends(optional_user)]
 CurrentMember = Annotated[Member, Depends(current_member)]
 QueueRuntime = Annotated[Runtime, Depends(get_runtime)]
 Storage = Annotated[MediaStorage, Depends(get_storage)]

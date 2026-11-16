@@ -186,7 +186,8 @@ def create_user(payload: UserCreate, actor: CurrentMember, db: DbSession):
         db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "An account with that email already exists",
+            "An account with that email already exists. Invite them instead; they accept "
+            "by signing in.",
         ) from None
     db.add(WorkspaceMember(workspace_id=actor.workspace_id, user_id=user.id, role=payload.role))
     db.commit()

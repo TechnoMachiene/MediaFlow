@@ -140,6 +140,8 @@ signal, the SLOs, and how to trace a single user's job.
   (see [docs/JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md)).
 - Isolates tenants in **workspaces**. Every job, post and permission belongs to one workspace,
   people can belong to several with a different role in each, and dedup never crosses tenants.
+  People join by **invitation**: a single-use, expiring link where newcomers choose their own
+  password and existing accounts consent by signing in (see [docs/TENANCY.md](docs/TENANCY.md)).
 - Supports members, managers and admins per workspace, platform admins, and a protected
   super-admin account.
 - Stores originals on local disk or any S3-compatible bucket, and applies a media retention
@@ -158,8 +160,8 @@ signal, the SLOs, and how to trace a single user's job.
 - It does not connect social accounts, send posts to platform APIs, or publish automatically when
   a calendar date arrives.
 - It does not provide in-app notifications for review results or scheduled dates.
-- It does not offer invitations, billing or per-workspace quotas yet. A workspace admin creates
-  accounts directly, and the Gemini rate limit is shared by the whole installation.
+- It does not offer billing or per-workspace quotas yet, and it does not email invitations: the
+  inviter shares the link. The Gemini rate limit is shared by the whole installation.
 - Demo drafts are deterministic templates, not real media understanding.
 
 ## Workflow
@@ -406,12 +408,22 @@ caller's role in that workspace, and records from other workspaces always answer
 | `PATCH /users/{user_id}` | Admin | Update role, email or password. |
 | `PATCH /users/{user_id}/role` | Admin | Change a member's role in this workspace. |
 | `DELETE /users/{user_id}` | Admin | Remove a member and their jobs here; the account is deleted if it is in no other workspace. |
+| `POST /invitations` | Manager/admin | Invite an email with a role; returns a single-use link (shown once). Inviting again replaces the old link. |
+| `GET /invitations` | Manager/admin | Pending invitations of this workspace. |
+| `DELETE /invitations/{id}` | Manager/admin | Withdraw a pending invitation (admin invitations: admins only). |
+| `POST /invitations/lookup` | Anyone with the link | Workspace, email, role and expiry of an invitation, and whether the email already has an account. |
+| `POST /invitations/accept` | The invitee | New email: send a `password` to create the account. Existing account: call it signed in as that email. |
+| `POST /workspaces/{id}/leave` | Member of it | Leave a workspace (not your only one, not as its last admin). Your work stays with it. |
+| `PATCH /workspaces/{id}` | Admin of it | Rename the workspace. |
 
-Managers can create users and managers, but cannot create admins. A workspace always keeps at
+Managers can create and invite users and managers, but not admins. A workspace always keeps at
 least one admin. An admin can change a member's email or password only if that account belongs
-to no other workspace, so one tenant can never take over a person shared with another. The
+to no other workspace, so one tenant can never take over a person shared with another. An
+account joins a second workspace only by accepting an invitation while signed in. The
 protected super-admin account cannot be modified or deleted through the API. Without
-`ALLOW_SIGNUP=1`, only managers and admins can create accounts.
+`ALLOW_SIGNUP=1`, people join by invitation or through an account a manager or admin creates.
+The full model, role matrix and invitation security properties are in
+[docs/TENANCY.md](docs/TENANCY.md).
 
 ### Media jobs and review
 
@@ -520,6 +532,7 @@ See [.env.example](./.env.example). Common settings:
 | `MEDIA_STORAGE`, `S3_BUCKET`, `S3_PREFIX`, `S3_ENDPOINT_URL`, `S3_REGION` | Where originals live: `local` or `s3`. |
 | `MEDIA_RETENTION_DAYS` | Days an unused original is kept; default 30, `0` keeps forever. |
 | `ALLOW_SIGNUP` | Self-serve sign-up that creates a workspace; default off. |
+| `INVITATION_TTL_HOURS` | How long an invitation link stays valid; default 168 (7 days), 1–720. |
 | `EMBEDDED_WORKER` | Run a queue worker inside the API process; default off. |
 | `DEMO_MODE` | Offline drafts, SQLite, embedded worker and demo accounts; never in production. |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini credentials and model identifier (not needed in demo mode). |

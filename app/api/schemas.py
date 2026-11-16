@@ -75,6 +75,61 @@ class SignupRequest(Credentials):
         return value
 
 
+class WorkspaceRename(WorkspaceCreate):
+    pass
+
+
+class InvitationCreate(BaseModel):
+    email: EmailStr
+    role: AssignableRole = "user"
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class InvitationView(BaseModel):
+    id: str
+    email: EmailStr
+    role: AssignableRole
+    status: Literal["pending", "accepted", "revoked", "expired"]
+    invited_by_email: EmailStr | None = None
+    created_at: datetime
+    expires_at: datetime
+
+
+class InvitationCreated(InvitationView):
+    """Returned once, to the inviter. The token is never stored or shown again."""
+
+    token: str
+    accept_path: str
+
+
+class InvitationToken(BaseModel):
+    # token_urlsafe(32) is 43 characters; allow some slack, refuse anything absurd.
+    token: str = Field(min_length=20, max_length=128)
+
+
+class InvitationPreview(BaseModel):
+    """What the person holding the link may see before accepting."""
+
+    workspace_name: str
+    email: EmailStr
+    role: AssignableRole
+    expires_at: datetime
+    account_exists: bool
+
+
+class InvitationAccept(InvitationToken):
+    # Only for a new account. An existing account accepts while signed in instead.
+    password: str | None = Field(default=None, min_length=12, max_length=128)
+
+
+class InvitationAccepted(TokenResponse):
+    workspace: WorkspaceView
+
+
 class DemoAccount(BaseModel):
     email: str
     role: Role
