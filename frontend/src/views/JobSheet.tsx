@@ -1,103 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, mediaUrl } from '../api';
 import {
-  CANCELLABLE, addDays, fmt, isAdmin, isReviewer, jobState, localTz, parseContent,
-  timezones, todayIn, tzLabel, wallClock, zonedToInstant,
+  CANCELLABLE, addDays, fmt, isAdmin, isReviewer, jobState, localTz, timezones, todayIn,
+  tzLabel, wallClock, zonedToInstant,
 } from '../lib';
 import { Sheet } from '../Sheet';
 import { useSession } from '../session';
 import { useToast } from '../toast';
 import type { Job, Post } from '../types';
+import { DraftPanel } from './Draft';
 import {
-  Button, ConfirmButton, CopyButton, ErrorNote, Field, Icon, JobBadge, Segmented, Spinner, useLast,
+  Button, ConfirmButton, ErrorNote, Field, Icon, JobBadge, Spinner, useLast,
 } from '../ui';
 
 /* ── Generated content ───────────────────────────────────────────────────── */
 
-const SECTION_LABELS: Record<string, string> = {
-  instagram: 'Instagram', tiktok: 'TikTok', facebook: 'Facebook', content_summary: 'Summary',
-};
-const FIELD_LABELS: Record<string, string> = {
-  recommended_format: 'Recommended format', caption: 'Caption', post_copy: 'Post',
-  hashtags: 'Hashtags', cover_text: 'Cover text', reel_hook: 'Reel hook', hook: 'Hook',
-  video_concept: 'Video concept', on_screen_text: 'On-screen text',
-  voiceover_script: 'Voiceover script', call_to_action: 'Call to action',
-  engagement_question: 'Engagement question', accessibility_description: 'Alt text',
-  translated_caption: 'English translation', detected_languages: 'Languages detected',
-  primary_content_language: 'Written in', media_type: 'Media type',
-  main_message: 'Main message', target_audience: 'Audience', primary_goal: 'Goal',
-  suggested_cta: 'Suggested call to action', content_tone: 'Tone', key_topics: 'Key topics',
-};
-const humanize = (key: string) =>
-  key.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
-
-function ContentField({ name, value }: { name: string; value: unknown }) {
-  const label = FIELD_LABELS[name] ?? humanize(name);
-  if (Array.isArray(value)) {
-    const items = value.map(String).filter(Boolean);
-    if (!items.length) return null;
-    const ordered = name === 'on_screen_text';
-    return (
-      <section className="content-field">
-        <header>
-          <h4>{label}</h4>
-          <CopyButton text={items.join(ordered ? '\n' : ' ')} />
-        </header>
-        {ordered ? (
-          <ol dir="auto">{items.map((item, i) => <li key={i}>{item}</li>)}</ol>
-        ) : (
-          <div className="chips" dir="auto">
-            {items.map((item, i) => <span key={i} className="chip">{item}</span>)}
-          </div>
-        )}
-      </section>
-    );
-  }
-  const text = typeof value === 'string' ? value.trim() : value == null ? '' : String(value);
-  if (!text) return null;
-  return (
-    <section className="content-field">
-      <header>
-        <h4>{label}</h4>
-        <CopyButton text={text} />
-      </header>
-      <p dir="auto">{text}</p>
-    </section>
-  );
-}
-
-export function ContentView({ text }: { text: string }) {
-  const content = useMemo(() => parseContent(text), [text]);
-  const sections = 'structured' in content ? Object.keys(content.structured) : [];
-  const [tab, setTab] = useState(sections[0] ?? '');
-  const current = sections.includes(tab) ? tab : sections[0];
-
-  if ('raw' in content) {
-    return (
-      <section className="content-field">
-        <header>
-          <h4>Generated draft</h4>
-          <CopyButton text={content.raw} />
-        </header>
-        <p dir="auto">{content.raw}</p>
-      </section>
-    );
-  }
-  const fields = Object.entries(content.structured[current]);
-  return (
-    <div className="content">
-      {sections.length > 1 && (
-        <Segmented
-          label="Platform"
-          value={current}
-          onChange={setTab}
-          options={sections.map((s) => ({ value: s, label: SECTION_LABELS[s] ?? humanize(s) }))}
-        />
-      )}
-      {fields.map(([name, value]) => <ContentField key={name} name={name} value={value} />)}
-    </div>
-  );
-}
+export { ContentView } from './Content';
 
 /* ── Media preview ───────────────────────────────────────────────────────── */
 
@@ -241,7 +159,10 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [scheduling, setScheduling] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState('');
   const state = jobState(job);
+  const canEdit = (owned || isReviewer(user.role)) && job.status === 'done' && !!job.result;
 
   const canCancel = (owned || isAdmin(user.role)) && CANCELLABLE.has(job.status);
   const canReview =
@@ -260,8 +181,8 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
     }
   }
 
-  const decide = (status: 'approved' | 'rejected') =>
-    run(status, () => api<Job>('PATCH', `/jobs/${job.job_id}/approval`, { status }), (next) => {
+  const decide = (status: 'approved' | 'rejected', comment?: string) =>
+    run(status, () => api<Job>('PATCH', `/jobs/${job.job_id}/approval`, { status, comment }), (next) => {
       onChanged(next);
       onReviewed?.(next);
       toast(status === 'approved' ? 'Approved' : 'Rejected');
@@ -324,8 +245,11 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
                     onClick={() => decide('approved')}>
                     Approve
                   </Button>
-                  <ConfirmButton label="Reject" confirm="Confirm reject"
-                    busy={busy === 'rejected'} onConfirm={() => decide('rejected')} />
+                  {!rejecting && (
+                    <Button variant="danger" disabled={!!busy} onClick={() => setRejecting(true)}>
+                      Reject…
+                    </Button>
+                  )}
                 </>
               )}
               {canSchedule && (
@@ -339,15 +263,34 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
               )}
             </div>
           )}
-          {canReview && (
+          {canReview && rejecting && (
+            <form
+              className="form panel"
+              onSubmit={(e) => { e.preventDefault(); if (reason.trim()) void decide('rejected', reason.trim()); }}
+            >
+              <Field label="What needs to change?" hint="Shared with the uploader in the comments.">
+                <textarea rows={3} maxLength={2000} autoFocus value={reason}
+                  onChange={(e) => setReason(e.target.value)} />
+              </Field>
+              <div className="form-actions">
+                <span className="spacer" />
+                <Button onClick={() => { setRejecting(false); setReason(''); }}>Cancel</Button>
+                <Button variant="danger" type="submit" busy={busy === 'rejected'} disabled={!reason.trim()}>
+                  Reject
+                </Button>
+              </div>
+            </form>
+          )}
+          {canReview && !rejecting && (
             <p className="footnote">
-              A decision is final. Approved drafts can be scheduled by the person who uploaded them.
+              Approved drafts can be scheduled by the person who uploaded them. If anyone edits a
+              draft later, it comes back here for review.
             </p>
           )}
         </>
       )}
 
-      {job.result && <ContentView text={job.result.text} />}
+      {job.result && <DraftPanel job={job} canEdit={canEdit} onChanged={onChanged} />}
       {job.result && (
         <p className="footnote">
           Drafted by {job.result.model}

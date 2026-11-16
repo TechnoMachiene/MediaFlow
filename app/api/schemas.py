@@ -191,6 +191,76 @@ class UserUpdate(BaseModel):
 
 class ApprovalDecision(BaseModel):
     status: Literal["approved", "rejected"]
+    # Optional note for the uploader; it is added to the draft's comment thread.
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+MAX_DRAFT_CHARS = 100_000
+
+
+class DraftVersionView(BaseModel):
+    number: int
+    text: str
+    source: Literal["ai", "edit", "restore"]
+    restored_from: int | None = None
+    note: str | None = None
+    author_email: str | None = None  # None: written by Gemini
+    created_at: datetime
+    current: bool
+
+
+class DraftSave(BaseModel):
+    """Save a new version. Send either `text`, or `restore` (an older version's number).
+    `base_version` is the version the editor started from; if someone saved since, the save
+    is refused with 409 instead of silently overwriting their work."""
+
+    base_version: int = Field(ge=1)
+    text: str | None = Field(default=None, max_length=MAX_DRAFT_CHARS)
+    restore: int | None = Field(default=None, ge=1)
+    note: str | None = Field(default=None, max_length=280)
+
+    @model_validator(mode="after")
+    def one_source(self):
+        if (self.text is None) == (self.restore is None):
+            raise ValueError("Send either text or restore")
+        return self
+
+
+class DraftSaved(BaseModel):
+    version: DraftVersionView
+    approval_status: Literal["pending", "approved", "rejected"]
+    returned_to_review: bool
+
+
+class CommentCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=2000)
+    field: str | None = Field(default=None, max_length=80, pattern=r"^[a-z0-9_]+(\.[a-z0-9_]+)?$")
+    parent_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("body")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Write something first")
+        return value
+
+
+class CommentUpdate(BaseModel):
+    resolved: bool
+
+
+class CommentView(BaseModel):
+    id: str
+    parent_id: str | None
+    version: int
+    field: str | None
+    kind: Literal["comment", "approved", "rejected"]
+    body: str
+    author_email: str
+    created_at: datetime
+    resolved_at: datetime | None
+    resolved_by_email: str | None
 
 
 class AnalysisResult(BaseModel):
@@ -212,6 +282,8 @@ class JobView(BaseModel):
     job_id: str
     status: str
     approval_status: Literal["pending", "approved", "rejected"] = "pending"
+    # Which version of the draft `result` holds: 1 is Gemini's, higher means edited.
+    draft_version: int = 1
     submitter_email: EmailStr | None = None
     original_filename: str
     attempts: int = 0

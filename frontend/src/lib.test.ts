@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  addDays, addMonths, headline, isAdmin, isReviewer, jobState, monthGrid, parseContent,
+  addDays, addMonths, diffContent, fieldLabel, fieldPaths, headline, isAdmin, isReviewer, jobState, monthGrid, parseContent,
   wallClock, zonedToInstant,
 } from './lib';
 
@@ -74,5 +74,37 @@ describe('time helpers', () => {
     expect(grid).toHaveLength(42);
     expect(grid).toContain('2026-11-01');
     expect(grid).toContain('2026-11-30');
+  });
+});
+
+describe('draft diffs and fields', () => {
+  const v1 = JSON.stringify({
+    instagram: { caption: 'Old caption', hashtags: ['#a', '#b'] },
+    facebook: { post_copy: 'Same' },
+  });
+  const v2 = JSON.stringify({
+    instagram: { caption: 'New caption', hashtags: ['#a', '#c'], hook: 'Added' },
+    facebook: { post_copy: 'Same' },
+  });
+
+  it('lists only the fields that changed, including added ones', () => {
+    expect(diffContent(v1, v2)).toEqual([
+      { path: 'instagram.caption', before: 'Old caption', after: 'New caption' },
+      { path: 'instagram.hashtags', before: '#a\n#b', after: '#a\n#c' },
+      { path: 'instagram.hook', before: '', after: 'Added' },
+    ]);
+    expect(diffContent(v1, v1)).toEqual([]);
+  });
+
+  it('treats plain-text drafts as one field', () => {
+    expect(diffContent('one', 'two')).toEqual([{ path: 'draft', before: 'one', after: 'two' }]);
+  });
+
+  it('names fields for people', () => {
+    expect(fieldLabel('instagram.caption')).toBe('Instagram · Caption');
+    expect(fieldLabel('tiktok.voiceover_script')).toBe('TikTok · Voiceover script');
+    expect(fieldLabel('draft')).toBe('Draft');
+    expect(fieldPaths(v1)).toEqual(['instagram.caption', 'instagram.hashtags', 'facebook.post_copy']);
+    expect(fieldPaths('prose')).toEqual([]);
   });
 });

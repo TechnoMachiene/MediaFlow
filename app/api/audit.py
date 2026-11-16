@@ -31,13 +31,14 @@ ACTIONS: dict[str, str] = {
     "job.approved": "A reviewer approved a draft",
     "job.rejected": "A reviewer rejected a draft",
     "job.cancelled": "A queued job was cancelled",
+    "draft.edited": "A draft was edited or an older version restored (sends it back for review)",
     "post.scheduled": "An approved draft was put on the calendar",
     "post.rescheduled": "A calendar entry's time or timezone changed",
     "post.cancelled": "A calendar entry was cancelled",
     "workspace.created": "The workspace was created",
     "workspace.renamed": "The workspace was renamed",
 }
-CATEGORIES = ("member", "invitation", "job", "post", "workspace")
+CATEGORIES = ("member", "invitation", "job", "draft", "post", "workspace")
 
 # Out-of-band changes (the admin CLI) have no signed-in actor.
 SYSTEM_ACTOR = "system:cli"

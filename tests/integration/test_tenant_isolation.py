@@ -25,6 +25,8 @@ from sqlalchemy import select
 from app.api.database import (
     ApiJob,
     AuditEvent,
+    DraftComment,
+    DraftVersion,
     ScheduledPost,
     User,
     Workspace,
@@ -38,7 +40,8 @@ pytestmark = pytest.mark.integration
 
 LATER = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
 SCHEDULE = {"scheduled_at": LATER, "timezone": "UTC"}
-A_TABLES = (ApiJob, ScheduledPost, WorkspaceMember, WorkspaceInvitation, AuditEvent)
+A_TABLES = (ApiJob, ScheduledPost, WorkspaceMember, WorkspaceInvitation, AuditEvent,
+            DraftVersion, DraftComment)
 
 
 @dataclass
@@ -59,9 +62,9 @@ class World:
         """Strings that only workspace A's data contains."""
         return {
             *(self.ids[k] for k in ("approved", "pending", "queued", "post", "invitation",
-                                    "anna", "alice", "carl")),
+                                    "comment", "anna", "alice", "carl")),
             "anna@a.example.com", "alice@a.example.com", "carl@a.example.com",
-            "invitee@example.com", "secret-a.png",
+            "invitee@example.com", "secret-a.png", "secret-comment",
         }
 
 
@@ -104,6 +107,8 @@ def world(make_rt, tmp_path, monkeypatch):
             "job_id"]  # never drained: still cancellable
         w.ids["invitation"] = client.post("/api/v1/invitations", headers=anna,
                                           json={"email": "invitee@example.com"}).json()["id"]
+        w.ids["comment"] = client.post(f"/api/v1/jobs/{w.ids['pending']}/comments",
+                                       headers=anna, json={"body": "secret-comment"}).json()["id"]
         w.ids["workspace"] = "ws-a"
         yield w
     engine.dispose()
@@ -158,6 +163,14 @@ SCOPED = [
            {"status": "approved"}, "anna"),
     Scoped("DELETE", "/jobs/{job_id}", {"job_id": "queued"}, None, "alice"),
     Scoped("POST", "/jobs/{job_id}/schedule", {"job_id": "schedulable"}, SCHEDULE, "alice", 201),
+    Scoped("GET", "/jobs/{job_id}/versions", {"job_id": "pending"}, None, "alice"),
+    Scoped("POST", "/jobs/{job_id}/versions", {"job_id": "pending"},
+           {"base_version": 1, "text": "rewritten by an outsider"}, "alice", 201),
+    Scoped("GET", "/jobs/{job_id}/comments", {"job_id": "pending"}, None, "alice"),
+    Scoped("POST", "/jobs/{job_id}/comments", {"job_id": "pending"}, {"body": "hello"},
+           "alice", 201),
+    Scoped("PATCH", "/jobs/{job_id}/comments/{comment_id}",
+           {"job_id": "pending", "comment_id": "comment"}, {"resolved": True}, "alice"),
     Scoped("GET", "/scheduled-posts/{post_id}", {"post_id": "post"}, None, "alice"),
     Scoped("PATCH", "/scheduled-posts/{post_id}", {"post_id": "post"}, SCHEDULE, "alice"),
     Scoped("DELETE", "/scheduled-posts/{post_id}", {"post_id": "post"}, None, "alice"),
@@ -206,7 +219,7 @@ def test_every_route_is_classified(world):
         if path.startswith("/api/v1")
         for method in operations
     }
-    assert len(routes) >= 37  # sanity: the enumeration really found the API
+    assert len(routes) >= 42  # sanity: the enumeration really found the API
     classified = (
         {(s.method, s.path) for s in SCOPED} | {("GET", p) for p in LISTS} | UNSCOPED
     )
@@ -261,7 +274,8 @@ def test_lists_do_show_the_data_to_its_own_workspace(world):
     seen = "".join(
         w.client.get(f"/api/v1{p}" + (f"?{q}" if q else ""), headers=w.as_("anna")).text
         for p, q in LISTS.items()
-    )
+    ) + w.client.get(f"/api/v1/jobs/{w.ids['pending']}/comments", headers=w.as_("anna")).text
+    # (comments are listed per job, not in a workspace-wide list)
     assert {m for m in w.markers() if m not in seen} == set()
 
 

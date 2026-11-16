@@ -31,6 +31,8 @@ from app.api import audit
 from app.api.database import (
     ACTIVE_STATUSES,
     ApiJob,
+    DraftComment,
+    DraftVersion,
     ScheduledPost,
     User,
     Workspace,
@@ -45,6 +47,7 @@ from app.api.dependencies import (
     Storage,
     effective_role,
 )
+from app.api.drafts import add_comment
 from app.api.lifecycle import set_status
 from app.api.media_storage import locate_job_media, store_media_asset
 from app.api.reconcile import dispatch_job
@@ -330,7 +333,8 @@ def delete_user(user_id: str, actor: CurrentMember, db: DbSession, runtime: Queu
 
     job_ids = [job.id for job in jobs]
     if job_ids:
-        db.execute(delete(ScheduledPost).where(ScheduledPost.job_id.in_(job_ids)))
+        for model in (ScheduledPost, DraftComment, DraftVersion):
+            db.execute(delete(model).where(model.job_id.in_(job_ids)))
         db.execute(delete(ApiJob).where(ApiJob.id.in_(job_ids)))
     audit.record(
         db, workspace_id=actor.workspace_id, actor=actor, action="member.removed",
@@ -462,9 +466,9 @@ def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) ->
         # Redis forgot the job (TTL or data loss). The row is authoritative now, and an active
         # row is picked up again by the reconciler.
         live_status = "done" if row.result is not None else row.status
-    result = data.get("result")
-    if result is None:
-        result = row.result
+    # The row's copy wins: it is durable, and once someone edits the draft it differs from the
+    # Gemini result still cached in Redis, which must never overwrite the edit.
+    result = row.result if row.result is not None else data.get("result")
     if result is not None:
         live_status = "done"
         row.result = result
@@ -475,6 +479,7 @@ def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) ->
         job_id=row.id,
         status=live_status,
         approval_status=row.approval_status,
+        draft_version=row.draft_version,
         submitter_email=submitter_email,
         original_filename=row.filename,
         attempts=data.get("attempts", 0),
@@ -851,6 +856,9 @@ def review_job(
         before={"approval_status": "pending"},
         after={"approval_status": decision.status, "owner": owner.email if owner else None},
     )
+    if decision.comment and decision.comment.strip():
+        # The reason lands in the draft's thread, where the uploader will look for it.
+        add_comment(db, row, actor, decision.comment.strip(), kind=decision.status)
     view = _job_view(
         row,
         runtime.store.status(job_id),

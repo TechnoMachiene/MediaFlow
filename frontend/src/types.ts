@@ -72,6 +72,36 @@ export interface AuditPage {
   next_before: number | null;
 }
 
+export interface DraftVersion {
+  number: number;
+  text: string;
+  source: 'ai' | 'edit' | 'restore';
+  restored_from: number | null;
+  note: string | null;
+  author_email: string | null;
+  created_at: string;
+  current: boolean;
+}
+
+export interface DraftSaved {
+  version: DraftVersion;
+  approval_status: Approval;
+  returned_to_review: boolean;
+}
+
+export interface DraftComment {
+  id: string;
+  parent_id: string | null;
+  version: number;
+  field: string | null;
+  kind: 'comment' | 'approved' | 'rejected';
+  body: string;
+  author_email: string;
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by_email: string | null;
+}
+
 export interface Meta {
   demo_mode: boolean;
   allow_signup: boolean;
@@ -90,6 +120,8 @@ export interface Job {
   job_id: string;
   status: string;
   approval_status: Approval;
+  /** Which version of the draft `result` holds; 1 is Gemini's. */
+  draft_version?: number;
   submitter_email: string | null;
   original_filename: string;
   attempts: number;

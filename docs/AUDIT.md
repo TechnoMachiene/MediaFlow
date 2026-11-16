@@ -36,6 +36,7 @@ from. Admins read it per workspace (`GET /api/v1/audit-events`, or **Audit** in 
 | `job.approved` | A reviewer approved a draft | pending → approved, owner |
 | `job.rejected` | A reviewer rejected a draft | pending → rejected, owner |
 | `job.cancelled` | A queued job was cancelled | status → cancelled |
+| `draft.edited` | A draft was edited or an older version restored (sends it back for review) | version, approval → version, approval, restored from |
 | `post.scheduled` | An approved draft was put on the calendar | → time, timezone, job |
 | `post.rescheduled` | A calendar entry's time or timezone changed | time, timezone → time, timezone |
 | `post.cancelled` | A calendar entry was cancelled | time, timezone → cancelled |
@@ -58,7 +59,7 @@ than audit events, so the trail stays a record of what actually changed.
 
 | Parameter | Meaning |
 |---|---|
-| `category` | `member`, `invitation`, `job`, `post` or `workspace` |
+| `category` | `member`, `invitation`, `job`, `draft`, `post` or `workspace` |
 | `action` | One exact action from the table above (`422` if unknown) |
 | `actor_id` | Everything one person did |
 | `target_id` | One user's, job's or post's whole history |

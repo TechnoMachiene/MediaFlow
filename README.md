@@ -150,7 +150,11 @@ signal, the SLOs, and how to trace a single user's job.
   super-admin account.
 - Stores originals on local disk or any S3-compatible bucket, and applies a media retention
   policy (originals deleted after 30 idle days by default; drafts kept).
-- Lets managers/admins review completed work and approve or reject it.
+- Lets managers/admins review completed work and approve or reject it, with a **draft editor**:
+  the uploader and reviewers edit drafts field by field, every save is a version (with a
+  field-level diff and one-click restore), concurrent saves can't overwrite each other, and
+  review comments thread on a version and a field. A rejection's reason lands in the thread,
+  and editing a decided draft sends it back for review.
 - Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
 - Stores schedule instants in UTC and displays them in the requested IANA timezone.
 - Ships a responsive web app (`frontend/`) covering upload, review, calendar, team, and queue
@@ -174,6 +178,9 @@ signal, the SLOs, and how to trace a single user's job.
 upload -> validate -> store original -> job row (PostgreSQL outbox) -> Redis queue -> worker
        -> Gemini -> result in Redis + PostgreSQL          (reconciler repairs any gap)
 completed job -> manager review -> approved -> owner schedules -> calendar
+                      ^       |
+                      |   rejected (reason in comments)
+                      +-- edit = new version, back to review
 ```
 
 The Gemini system prompt is designed to inspect the supplied media and generate platform-specific
@@ -442,7 +449,12 @@ The full model, role matrix and invitation security properties are in
 | `GET /jobs/review` | Manager/admin | List completed jobs awaiting review. |
 | `GET /jobs/approved` | Manager/admin | List completed, approved jobs. |
 | `GET /jobs/rejected` | Manager/admin | List completed, rejected jobs. |
-| `PATCH /jobs/{job_id}/approval` | Manager/admin | Approve or reject a completed job. |
+| `PATCH /jobs/{job_id}/approval` | Manager/admin | Approve or reject a completed job; an optional `comment` (the reason) is added to the draft's thread. |
+| `GET /jobs/{job_id}/versions` | Owner/manager/admin | The draft's versions, newest first (1 is Gemini's). |
+| `POST /jobs/{job_id}/versions` | Owner/manager/admin | Save `text` (or `restore` an older version) as a new version. `base_version` must be the current one, or `409`. Sends a decided draft back for review; refused while it is on the calendar. |
+| `GET /jobs/{job_id}/comments` | Owner/manager/admin | Review comments, oldest first; replies carry `parent_id`. |
+| `POST /jobs/{job_id}/comments` | Owner/manager/admin | Comment on the current version, optionally on one `field` (e.g. `instagram.caption`), or reply with `parent_id`. |
+| `PATCH /jobs/{job_id}/comments/{comment_id}` | Owner/manager/admin | Resolve or reopen a thread (`{"resolved": true}`). |
 | `GET /jobs` | Admin | Search/list jobs, with pagination and optional media-kind filter. |
 | `GET /stats` | Admin | This workspace's job counts; platform admins also get installation-wide queue depths and Gemini calls today. |
 

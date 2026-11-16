@@ -27,7 +27,11 @@ def persist_api_result(session_factory: Callable[[], Session], job_id: str, resu
             # cache_key is workspace-scoped, so followers in other tenants are never touched.
             statement = update(ApiJob).where(ApiJob.cache_key == row.cache_key)
         db.execute(
-            statement.where(ApiJob.status.in_(allowed_from("done"))).values(
+            statement.where(
+                ApiJob.status.in_(allowed_from("done")),
+                # A replayed or shared result must never overwrite a draft someone edited.
+                ApiJob.draft_version == 1,
+            ).values(
                 result=result, status="done", error=None, updated_at=datetime.now(timezone.utc)
             )
         )

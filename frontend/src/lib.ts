@@ -101,6 +101,67 @@ export function parseContent(text: string): Content {
   return { raw: text };
 }
 
+export const SECTION_LABELS: Record<string, string> = {
+  instagram: 'Instagram', tiktok: 'TikTok', facebook: 'Facebook', content_summary: 'Summary',
+};
+export const FIELD_LABELS: Record<string, string> = {
+  recommended_format: 'Recommended format', caption: 'Caption', post_copy: 'Post',
+  hashtags: 'Hashtags', cover_text: 'Cover text', reel_hook: 'Reel hook', hook: 'Hook',
+  video_concept: 'Video concept', on_screen_text: 'On-screen text',
+  voiceover_script: 'Voiceover script', call_to_action: 'Call to action',
+  engagement_question: 'Engagement question', accessibility_description: 'Alt text',
+  translated_caption: 'English translation', detected_languages: 'Languages detected',
+  primary_content_language: 'Written in', media_type: 'Media type',
+  main_message: 'Main message', target_audience: 'Audience', primary_goal: 'Goal',
+  suggested_cta: 'Suggested call to action', content_tone: 'Tone', key_topics: 'Key topics',
+};
+export const humanize = (key: string) =>
+  key.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+/** "instagram.caption" → "Instagram · Caption"; a bare key is a plain-text draft's only field. */
+export function fieldLabel(path: string): string {
+  const [section, field] = path.split('.');
+  if (!field) return 'Draft';
+  return `${SECTION_LABELS[section] ?? humanize(section)} · ${FIELD_LABELS[field] ?? humanize(field)}`;
+}
+
+/** Every field a comment can be anchored to, in display order. */
+export function fieldPaths(text: string): string[] {
+  const content = parseContent(text);
+  if ('raw' in content) return [];
+  return Object.entries(content.structured).flatMap(([section, fields]) =>
+    Object.keys(fields).map((field) => `${section}.${field}`));
+}
+
+const asText = (v: unknown): string =>
+  v == null ? '' : Array.isArray(v) ? v.map(String).join('\n') : typeof v === 'object'
+    ? JSON.stringify(v) : String(v);
+
+export interface FieldChange { path: string; before: string; after: string }
+
+/** What changed between two versions, field by field (added and removed fields included). */
+export function diffContent(before: string, after: string): FieldChange[] {
+  const a = parseContent(before);
+  const b = parseContent(after);
+  if ('raw' in a || 'raw' in b) {
+    const x = 'raw' in a ? a.raw : before;
+    const y = 'raw' in b ? b.raw : after;
+    return x === y ? [] : [{ path: 'draft', before: x, after: y }];
+  }
+  const changes: FieldChange[] = [];
+  const sections = [...new Set([...Object.keys(a.structured), ...Object.keys(b.structured)])];
+  for (const section of sections) {
+    const left = a.structured[section] ?? {};
+    const right = b.structured[section] ?? {};
+    for (const field of [...new Set([...Object.keys(left), ...Object.keys(right)])]) {
+      const x = asText(left[field]);
+      const y = asText(right[field]);
+      if (x !== y) changes.push({ path: `${section}.${field}`, before: x, after: y });
+    }
+  }
+  return changes;
+}
+
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 
 /** One line that says what this media is about, for tiles and calendar entries. */

@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     create_engine,
     event,
@@ -198,6 +199,9 @@ class ApiJob(Base):
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The draft version `result` currently holds. 1 is Gemini's draft; each human save adds one
+    # (see DraftVersion). Once above 1, nothing from the queue may overwrite `result`.
+    draft_version: Mapped[int] = mapped_column(default=1, server_default="1", nullable=False)
     recoveries: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -205,6 +209,66 @@ class ApiJob(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class DraftVersion(Base):
+    """One immutable version of a job's draft. Version 1 is Gemini's output (stored when the
+    first edit happens); every save, including a restore of an older version, adds the next."""
+
+    __tablename__ = "draft_versions"
+    __table_args__ = (UniqueConstraint("job_id", "number", name="uq_draft_versions_job_number"),)
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("api_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    number: Mapped[int] = mapped_column(nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(12), nullable=False)  # ai | edit | restore
+    restored_from: Mapped[int | None] = mapped_column(nullable=True)
+    note: Mapped[str | None] = mapped_column(String(280), nullable=True)
+    # Snapshots, so history survives deleting the author. NULL author means Gemini.
+    author_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    author_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
+class DraftComment(Base):
+    """A review comment on a draft: anchored to the version it was written on and, optionally,
+    to one field (`instagram.caption`). Replies point at a top-level comment; only top-level
+    comments are resolved. `kind` marks the note that came with an approve/reject decision."""
+
+    __tablename__ = "draft_comments"
+    __table_args__ = (Index("ix_draft_comments_job_created", "job_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("api_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("draft_comments.id", ondelete="CASCADE"), nullable=True
+    )
+    version: Mapped[int] = mapped_column(nullable=False)
+    field: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    kind: Mapped[str] = mapped_column(String(12), nullable=False, default="comment")
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    author_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
 
 
 class ScheduledPost(Base):
