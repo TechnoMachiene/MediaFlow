@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from app.api.database import ApiJob
@@ -32,7 +32,8 @@ def persist_api_result(session_factory: Callable[[], Session], job_id: str, resu
                 # A replayed or shared result must never overwrite a draft someone edited.
                 ApiJob.draft_version == 1,
             ).values(
-                result=result, status="done", error=None, updated_at=datetime.now(timezone.utc)
+                result=result, status="done", error=None, updated_at=datetime.now(timezone.utc),
+                completed_at=func.coalesce(ApiJob.completed_at, datetime.now(timezone.utc)),
             )
         )
 
@@ -40,15 +41,18 @@ def persist_api_result(session_factory: Callable[[], Session], job_id: str, resu
 def persist_api_status(
     session_factory: Callable[[], Session], job_id: str, status: str, error: str | None
 ) -> None:
+    now = datetime.now(timezone.utc)
+    stamps = {}
+    if status == "processing":
+        stamps["started_at"] = func.coalesce(ApiJob.started_at, now)
+    elif status in ("failed", "dead"):
+        stamps["completed_at"] = func.coalesce(ApiJob.completed_at, now)
     with session_factory.begin() as db:
         db.execute(
             update(ApiJob)
             .where(ApiJob.id == job_id, ApiJob.status.in_(allowed_from(status)))
-            .values(
-                status=status,
-                error=(error or None) and error[:500],
-                updated_at=datetime.now(timezone.utc),
-            )
+            .values(status=status, error=(error or None) and error[:500], updated_at=now,
+                    **stamps)
         )
 
 

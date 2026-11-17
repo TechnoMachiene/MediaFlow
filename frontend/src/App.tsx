@@ -12,6 +12,7 @@ import { Activity } from './views/Activity';
 import { Audit } from './views/Audit';
 import { Calendar } from './views/Calendar';
 import { AcceptInvite, readInviteToken } from './views/Invite';
+import { Insights } from './views/Insights';
 import { Library } from './views/Library';
 import { Publishing, PublishingAuth, readPublishingAuth } from './views/Publishing';
 import { Login } from './views/Login';
@@ -19,12 +20,13 @@ import { Review } from './views/Review';
 import { Settings } from './views/Settings';
 import { Team } from './views/Team';
 
-type Route = 'library' | 'review' | 'calendar' | 'publishing' | 'team' | 'activity' | 'audit'
-  | 'settings';
+type Route = 'library' | 'review' | 'calendar' | 'insights' | 'publishing' | 'team' | 'activity'
+  | 'audit' | 'settings';
 const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boolean; view: () => React.JSX.Element }[] = [
   { id: 'library', label: 'Library', icon: 'library', allow: () => true, view: Library },
   { id: 'review', label: 'Review', icon: 'review', allow: (u) => isReviewer(u.role), view: Review },
   { id: 'calendar', label: 'Calendar', icon: 'calendar', allow: () => true, view: Calendar },
+  { id: 'insights', label: 'Insights', icon: 'chart', allow: (u) => isReviewer(u.role), view: Insights },
   { id: 'publishing', label: 'Publishing', icon: 'upload', allow: (u) => isAdmin(u.role), view: Publishing },
   { id: 'team', label: 'Team', icon: 'team', allow: (u) => isReviewer(u.role), view: Team },
   { id: 'activity', label: 'Activity', icon: 'activity', allow: (u) => isAdmin(u.role), view: Activity },

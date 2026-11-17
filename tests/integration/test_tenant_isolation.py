@@ -243,6 +243,8 @@ LISTS = {
     "/jobs/rejected": "", "/stats": "", "/scheduled-posts": RANGE, "/calendar": RANGE,
     "/invitations": "", "/audit-events": "", "/auth/me": "", "/workspaces": "",
     "/publishing/providers": "", "/publishing/connections": "", "/publishing/sandbox": "",
+    # Aggregates; the installation view is for platform admins and has no content or ids.
+    "/analytics": "", "/analytics/workspaces": "",
 }
 
 # Routes with no resource id: public, account-level, or creating inside the caller's own
@@ -278,7 +280,7 @@ def test_every_route_is_classified(world):
         if path.startswith("/api/v1")
         for method in operations
     }
-    assert len(routes) >= 58  # sanity: the enumeration really found the API
+    assert len(routes) >= 60  # sanity: the enumeration really found the API
     classified = (
         {(s.method, s.path) for s in SCOPED} | {("GET", p) for p in LISTS} | UNSCOPED
     )

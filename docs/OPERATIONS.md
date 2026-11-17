@@ -96,6 +96,10 @@ workspace and job ids are never labels.
 | `mediaflow_redis_up` | gauge | Redis answered the last scrape |
 | `mediaflow_workers_alive` | gauge | Workers with a current heartbeat in Redis, including embedded workers that Prometheus can't discover |
 
+Per-workspace product numbers (approval rates, review turnaround, volume by channel) are
+deliberately not metrics: they come from durable rows, per tenant. See
+[ANALYTICS.md](ANALYTICS.md).
+
 ## Investigating one job
 
 A user reports "my upload never finished" and gives you the `X-Request-ID` from the response

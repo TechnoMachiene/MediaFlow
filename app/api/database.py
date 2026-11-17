@@ -213,6 +213,11 @@ class ApiJob(Base):
     # The draft version `result` currently holds. 1 is Gemini's draft; each human save adds one
     # (see DraftVersion). Once above 1, nothing from the queue may overwrite `result`.
     draft_version: Mapped[int] = mapped_column(default=1, server_default="1", nullable=False)
+    # Durable stage timestamps for analytics (docs/ANALYTICS.md), stamped once by the status
+    # listener below and by the worker hooks: first time a worker picked the job up, and when
+    # it reached done, failed or dead.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When the review decision was made (approve/reject); drives rejected-draft retention.
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # This job's original was deleted (policy | published | manual): its media and links answer
@@ -448,6 +453,20 @@ class SandboxRequest(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
+
+
+FINISHED_STATUSES = ("done", "failed", "dead")
+
+
+@event.listens_for(ApiJob.status, "set")
+def _stamp_stage(job: ApiJob, value: str, _old, _initiator) -> None:
+    """Every ORM status change (API, reconciler, dispatch) stamps the stage it reaches, once.
+    The worker hooks use SQL UPDATEs and stamp the same columns with COALESCE."""
+    now = datetime.now(timezone.utc)
+    if value == "processing" and job.started_at is None:
+        job.started_at = now
+    elif value in FINISHED_STATUSES and job.completed_at is None:
+        job.completed_at = now
 
 
 ACTIVE_STATUSES = frozenset({"queued", "waiting", "processing", "retrying"})

@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 
+from app.api.analytics import router as analytics_router
 from app.api.audit_api import router as audit_router
 from app.api.config import ApiSettings
 from app.api.database import (
@@ -117,6 +118,7 @@ def create_app(
     application.include_router(router)
     application.include_router(workspaces_router)
     application.include_router(audit_router)
+    application.include_router(analytics_router)
     application.include_router(drafts_router)
     application.include_router(publishing_router)
     application.include_router(media_router)

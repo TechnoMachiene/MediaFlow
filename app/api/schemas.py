@@ -276,6 +276,105 @@ class RetentionView(RetentionPolicy):
     preview: RetentionPreview  # what the next run would delete now
 
 
+class Timing(BaseModel):
+    """Seconds, nearest-rank percentiles. None when there were no events."""
+
+    count: int
+    p50: float | None = None
+    p90: float | None = None
+    max: float | None = None
+
+
+class AnalyticsTotals(BaseModel):
+    uploads: int
+    drafted: int
+    failed: int
+    approved: int
+    rejected: int
+    edits: int
+    comments: int
+    scheduled: int
+    published: int
+    publish_failed: int
+
+
+class AnalyticsRates(BaseModel):
+    """Fractions 0..1; None when there was nothing to divide by."""
+
+    approval: float | None
+    first_pass_approval: float | None  # approved with no earlier rejection or edit
+    failure: float | None
+    publish_success: float | None
+
+
+class AnalyticsTimings(BaseModel):
+    queue_wait: Timing  # upload -> a worker starts
+    analysis: Timing  # worker starts -> draft ready
+    review_wait: Timing  # draft ready -> review decision
+    publish_lag: Timing  # calendar time -> live on the platform
+
+
+class AnalyticsKind(BaseModel):
+    kind: Literal["image", "video"]
+    uploads: int
+    drafted: int
+    approved: int
+    rejected: int
+    analysis: Timing
+    review_wait: Timing
+
+
+class AnalyticsChannel(BaseModel):
+    channel: str
+    provider: str
+    requested: int
+    published: int
+    failed: int
+    success_rate: float | None
+    top_error: str | None
+    publish_lag: Timing
+
+
+class AnalyticsDay(BaseModel):
+    date: date
+    uploads: int
+    drafted: int
+    approved: int
+    rejected: int
+    published: int
+
+
+class Insight(BaseModel):
+    kind: Literal["bottleneck", "approval_trend", "first_pass", "failures", "channel",
+                  "backlog", "volume"]
+    severity: Literal["info", "warn"]
+    text: str
+
+
+class AnalyticsReport(BaseModel):
+    start: date
+    end: date
+    timezone: str
+    totals: AnalyticsTotals
+    rates: AnalyticsRates
+    timings: AnalyticsTimings
+    previous_totals: AnalyticsTotals  # the same length of time just before `start`
+    previous_rates: AnalyticsRates
+    by_kind: list[AnalyticsKind]
+    by_channel: list[AnalyticsChannel]
+    series: list[AnalyticsDay]  # one per local day
+    insights: list[Insight]
+
+
+class WorkspaceAnalytics(BaseModel):
+    workspace_id: str
+    name: str
+    totals: AnalyticsTotals
+    rates: AnalyticsRates
+    analysis_p50: float | None
+    review_wait_p50: float | None
+
+
 class DemoAccount(BaseModel):
     email: str
     role: Role

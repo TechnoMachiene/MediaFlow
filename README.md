@@ -159,6 +159,10 @@ signal, the SLOs, and how to trace a single user's job.
   review comments thread on a version and a field. A rejection's reason lands in the thread,
   and editing a decided draft sends it back for review.
 - Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
+- Reports **insights** per workspace: content volume by day, media and channel, approval and
+  first-pass approval rates, where the time goes (queue wait, analysis, review, publishing lag
+  at p50/p90), comparison with the previous period, and rule-based findings on what to act on
+  (see [docs/ANALYTICS.md](docs/ANALYTICS.md)).
 - Publishes calendar entries at their time through a **provider interface** (OAuth with PKCE,
   encrypted credentials, retries with backoff, async processing, crash-safe delivery). Only the
   sandbox provider exists; each sandbox account can simulate a failure mode on purpose.
@@ -440,6 +444,8 @@ caller's role in that workspace, and records from other workspaces always answer
 | `GET`, `POST /scheduled-posts/{post_id}/publications` | Post owner/admin | List, or add an account to publish an approved calendar entry to at its time. |
 | `POST /publications/{id}/retry`, `DELETE /publications/{id}` | Post owner/admin | Retry a failed or uncertain delivery; cancel a pending one. |
 | `GET /publishing/sandbox` | Authenticated | The sandbox platform's posts and request log for this workspace. |
+| `GET /analytics` | Manager/admin | This workspace's report for `start`..`end` in a `timezone` (default: last 30 days). |
+| `GET /analytics/workspaces` | Platform admin | Every workspace's totals, rates and median times, side by side. |
 | `GET /audit-events` | Admin | This workspace's audit trail, newest first; filter by `category`, `action`, `actor_id` or `target_id`, page with `before`. |
 
 Managers can create and invite users and managers, but not admins. A workspace always keeps at

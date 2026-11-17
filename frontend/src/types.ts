@@ -175,6 +175,43 @@ export interface RetentionView extends RetentionPolicy {
   preview: RetentionPreview;
 }
 
+export interface Timing {
+  count: number;
+  p50: number | null;
+  p90: number | null;
+  max: number | null;
+}
+
+export interface AnalyticsTotals {
+  uploads: number; drafted: number; failed: number; approved: number; rejected: number;
+  edits: number; comments: number; scheduled: number; published: number; publish_failed: number;
+}
+
+export interface AnalyticsRates {
+  approval: number | null;
+  first_pass_approval: number | null;
+  failure: number | null;
+  publish_success: number | null;
+}
+
+export interface AnalyticsReport {
+  start: string;
+  end: string;
+  timezone: string;
+  totals: AnalyticsTotals;
+  rates: AnalyticsRates;
+  timings: { queue_wait: Timing; analysis: Timing; review_wait: Timing; publish_lag: Timing };
+  previous_totals: AnalyticsTotals;
+  previous_rates: AnalyticsRates;
+  by_kind: { kind: MediaKind; uploads: number; drafted: number; approved: number; rejected: number;
+    analysis: Timing; review_wait: Timing }[];
+  by_channel: { channel: string; provider: string; requested: number; published: number;
+    failed: number; success_rate: number | null; top_error: string | null; publish_lag: Timing }[];
+  series: { date: string; uploads: number; drafted: number; approved: number; rejected: number;
+    published: number }[];
+  insights: { kind: string; severity: 'info' | 'warn'; text: string }[];
+}
+
 export interface Meta {
   demo_mode: boolean;
   allow_signup: boolean;
