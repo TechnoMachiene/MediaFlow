@@ -34,3 +34,37 @@ def test_api_config_rejects_non_postgres_database(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "x" * 32)
     with pytest.raises(ConfigError, match="postgresql\\+psycopg"):
         ApiSettings.from_env()
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql+psycopg://mediaflow:mediaflow@postgres:5432/mediaflow",  # the old default
+    "postgresql+psycopg://app:short-but-real@db.internal/app",
+    "postgresql+psycopg://app@db.internal/app",  # no password at all
+    "postgresql+psycopg://app:CHANGEME@db.internal/app",
+])
+def test_a_networked_database_needs_a_strong_password(url):
+    from app.api.config import check_database_credentials
+
+    with pytest.raises(ConfigError, match="weak password"):
+        check_database_credentials(url)
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql+psycopg://app:3f9c1a7e5b2d8c4f6a0e9b1d@db.internal/app",
+    "postgresql+psycopg://media_queue:replace-me@localhost:5432/media_queue",  # local dev
+    "postgresql+psycopg://app:x@127.0.0.1/app",
+    "postgresql+psycopg:///app",  # Unix socket
+    "sqlite:///demo.sqlite3",
+])
+def test_strong_or_local_databases_are_accepted(url):
+    from app.api.config import check_database_credentials
+
+    check_database_credentials(url)
+
+
+def test_settings_refuse_a_weak_networked_database(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://mediaflow:mediaflow@postgres/mf")
+    monkeypatch.setenv("JWT_SECRET", "s" * 40)
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    with pytest.raises(ConfigError, match="weak password"):
+        ApiSettings.from_env()

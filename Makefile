@@ -1,4 +1,4 @@
-.PHONY: setup lint unit integration live test cov done api worker demo migrate reconcile prune-media web web-dev web-test \
+.PHONY: setup lint unit integration live test cov done api worker demo migrate reconcile prune-media web web-dev web-test e2e \
 	docker-up docker-down docker-logs docker-admin docker-demo docker-demo-down demo-check \
 	obs-demo obs-up obs-urls alerts-test dashboard
 setup:        ; pip install -r requirements-dev.txt
@@ -8,7 +8,7 @@ integration:  ; pytest -m integration
 live:         ; RUN_LIVE=1 pytest -m live -s
 test:         ; pytest
 cov:          ; pytest -m "not live" --cov --cov-report=term-missing
-done: lint unit integration cov
+done: lint unit cov  # cov already runs the integration tests; don't run them twice
 	@echo "Automated gate passed. Run 'make web-test' for the UI, then tick docs/DEFINITION_OF_DONE.md."
 api:          ; uvicorn app.api.main:app --reload
 worker:       ; python -m app.cli worker
@@ -26,6 +26,8 @@ prune-media:  ; python -m app.cli prune-media
 web:          ; cd frontend && npm install && npm run build
 web-dev:      ; cd frontend && npm install && npm run dev
 web-test:     ; cd frontend && npm install && npm test
+# Real browser, real app (demo mode): needs Redis and `npx playwright install chromium` once.
+e2e:          ; cd frontend && npm install && npm run e2e
 
 # ── Docker (see compose.yaml) ──────────────────────────────────────────────────────────────
 DEMO_COMPOSE = docker compose -f compose.demo.yaml

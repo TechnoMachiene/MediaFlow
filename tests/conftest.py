@@ -11,6 +11,34 @@ from app.wiring import build_runtime
 from tests.helpers import ScriptedClient
 
 
+@pytest.fixture(autouse=True, scope="session")
+def cheap_password_hashing():
+    """Argon2 at production cost takes ~95 ms per hash or check, and the suite creates and
+    signs in thousands of accounts. Tests use the same algorithm at minimal cost; production
+    keeps PasswordHash.recommended() (app/api/security.py). Hashes encode their parameters, so
+    verifying works either way."""
+    from pwdlib import PasswordHash
+    from pwdlib.hashers.argon2 import Argon2Hasher
+
+    from app.api import security
+
+    original = security.password_hash
+    security.password_hash = PasswordHash((Argon2Hasher(time_cost=1, memory_cost=1024,
+                                                        parallelism=1),))
+    yield
+    security.password_hash = original
+
+
+@pytest.fixture(autouse=True)
+def dispose_test_engines():
+    """Safety net: no test can leak an in-memory database, however it exits."""
+    from tests.api_harness import ENGINES
+
+    yield
+    while ENGINES:
+        ENGINES.pop().dispose()
+
+
 @pytest.fixture(autouse=True)
 def no_dotenv(monkeypatch):
     """Tests must not depend on a developer's local .env file."""

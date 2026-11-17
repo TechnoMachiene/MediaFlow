@@ -12,7 +12,7 @@ x-app: &app
   image: mediaflow:latest
   restart: unless-stopped
   environment: &app-env
-    DATABASE_URL: postgresql+psycopg://mediaflow:${POSTGRES_PASSWORD:-mediaflow}@postgres:5432/mediaflow
+    DATABASE_URL: postgresql+psycopg://mediaflow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 24)}@postgres:5432/mediaflow
     REDIS_URL: redis://redis:6379/0
     QUEUE_PREFIX: ${QUEUE_PREFIX:-ma}
     JWT_SECRET: ${JWT_SECRET:-}
@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: mediaflow
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mediaflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 24)}
       POSTGRES_DB: mediaflow
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -84,6 +84,8 @@ services:
     <<: *app
     restart: "no"
     command: ["alembic", "upgrade", "head"]
+    # One-shot: no API runs here, so the image's API healthcheck would mark it unhealthy.
+    healthcheck: { disable: true }
     depends_on:
       postgres: { condition: service_healthy }
 

@@ -20,10 +20,16 @@ from app.api.security import hash_password
 PASSWORD = "a-very-long-test-password"
 
 
+# Every engine built here, so a conftest fixture can dispose them after each test even when the
+# test leaves early (continue, return, a failed assertion). dispose() is idempotent.
+ENGINES: list = []
+
+
 def sqlite_sessions():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
+    ENGINES.append(engine)
     Base.metadata.create_all(engine)
     return engine, sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 

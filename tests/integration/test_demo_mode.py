@@ -148,7 +148,7 @@ def test_seed_is_idempotent_and_refuses_outside_demo_mode(monkeypatch, capsys):
     engine.dispose()
 
     monkeypatch.delenv("DEMO_MODE", raising=False)
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://unused")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:3f9c1a7e5b2d8c4f6a0e9b1d@unused/db")
     monkeypatch.setenv("JWT_SECRET", "x" * 40)
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
     assert main(["seed"]) == 2

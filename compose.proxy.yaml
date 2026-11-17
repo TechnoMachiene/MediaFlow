@@ -1,0 +1,38 @@
+# HTTPS and edge rate limits in front of compose.yaml. With this overlay the API is no longer
+# published; only the proxy is, on 80 (redirect + certificate challenges) and 443.
+#
+#   DOMAIN=media.example.com docker compose -f compose.yaml -f compose.proxy.yaml up -d --wait
+#
+# Get the first certificate before starting it (docs/DEPLOYMENT.md, "HTTPS").
+services:
+  proxy:
+    image: nginx:1.31-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the public host name, e.g. media.example.com}
+    volumes:
+      - ./ops/nginx/templates:/etc/nginx/templates:ro
+      - certs:/etc/letsencrypt:ro
+      - acme:/var/www/certbot:ro
+    depends_on:
+      api: { condition: service_healthy }
+
+  # Obtains and renews certificates; runs only when called (see docs/DEPLOYMENT.md).
+  certbot:
+    image: certbot/certbot:v4.1.1
+    profiles: ["certbot"]
+    volumes:
+      - certs:/etc/letsencrypt
+      - acme:/var/www/certbot
+
+  api:
+    ports: !reset []
+    environment:
+      # Only the proxy can reach the API now, so trust its X-Forwarded-For (which it overwrites
+      # with the real client address) for the per-address sign-in throttle and the logs.
+      FORWARDED_ALLOW_IPS: "*"
+
+volumes:
+  certs:
+  acme:

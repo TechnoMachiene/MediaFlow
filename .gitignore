@@ -24,3 +24,6 @@ uploads/*
 *.sqlite3
 *.db
 demo-uploads/
+
+# Backups hold every account, draft and original (scripts/backup.sh); never commit them.
+backups/

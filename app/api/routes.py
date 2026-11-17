@@ -87,6 +87,7 @@ from app.api.schemas import (
     WorkspaceView,
 )
 from app.api.security import create_versioned_access_token, hash_password, verify_password
+from app.api.throttle import client_ip
 from app.errors import MediaError
 from app.media import ALLOWED, inspect_media
 from app.obs.metrics import JOBS_ACCEPTED
@@ -373,13 +374,18 @@ def read_meta(request: Request):
 
 @router.post("/auth/login", response_model=TokenResponse)
 def login(payload: Credentials, request: Request, db: DbSession):
+    throttle, ip = request.app.state.throttle, client_ip(request)
+    # Checked before the password, so a blocked attempt reveals nothing about it.
+    throttle.check_login(ip, str(payload.email))
     user = db.scalar(select(User).where(User.email == str(payload.email)))
     if user is None or not verify_password(payload.password, user.password_hash):
+        throttle.login_failed(ip, str(payload.email))
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    throttle.login_succeeded(ip, str(payload.email))
     return _token(request, user)
 
 
@@ -388,6 +394,7 @@ def signup(payload: SignupRequest, request: Request, db: DbSession):
     """Self-serve: a new account plus a new workspace that it administers."""
     if not request.app.state.api_settings.allow_signup:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sign-up is not enabled")
+    request.app.state.throttle.check_signup(client_ip(request))
     if str(payload.email).lower() == SUPER_ADMIN_EMAIL:
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with that email already exists")
     user = User(email=str(payload.email), password_hash=hash_password(payload.password))

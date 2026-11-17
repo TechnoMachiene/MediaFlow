@@ -28,6 +28,7 @@ from app.api.media_links import MediaLinkSigner
 from app.api.media_links import router as media_links_router
 from app.api.publishing import router as publishing_router
 from app.api.routes import router
+from app.api.throttle import Throttle
 from app.api.worker_setup import configure_worker
 from app.api.workspaces import router as workspaces_router
 from app.config import Settings
@@ -80,6 +81,12 @@ def create_app(
         app.state.storage = storage or cfg.build_storage()
         app.state.cipher = cfg.build_cipher()
         app.state.media_signer = MediaLinkSigner(cfg.jwt_secret)
+        app.state.throttle = Throttle(  # no Redis (API-only unit tests): fails open
+            getattr(rt, "r", None), getattr(getattr(rt, "settings", None), "prefix", "ma"),
+            max_failures=cfg.login_max_failures,
+            ip_max_failures=cfg.login_ip_max_failures, window_s=cfg.login_window_s,
+            signup_ip_max=cfg.signup_ip_max,
+        )
         app.state.providers = build_providers(cfg.publishing_providers, db_sessions)
         app.state.owns_runtime = runtime is None
         app.state.owns_engine = engine is None

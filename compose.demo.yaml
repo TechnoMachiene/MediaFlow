@@ -56,6 +56,8 @@ services:
     <<: *app
     restart: "no"
     command: ["alembic", "upgrade", "head"]
+    # One-shot: no API runs here, so the image's API healthcheck would mark it unhealthy.
+    healthcheck: { disable: true }
     depends_on:
       postgres: { condition: service_healthy }
 

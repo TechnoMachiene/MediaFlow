@@ -9,6 +9,29 @@ from app.errors import ConfigError
 
 DEMO_JWT_SECRET = "demo-mode-only-secret-" + "x" * 32
 
+# Passwords nobody should be allowed to deploy with (docs/DEPLOYMENT.md).
+WEAK_DB_PASSWORDS = {"", "mediaflow", "postgres", "password", "replace-me", "changeme",
+                     "change-me", "admin", "secret", "root", "123456", "12345678", "test"}
+MIN_DB_PASSWORD = 16
+LOCAL_DB_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
+
+
+def check_database_credentials(database_url: str) -> None:
+    """A database reached over a network needs a strong password. Local development
+    (localhost or a Unix socket) and SQLite are exempt."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(database_url)
+    if url.get_backend_name() == "sqlite" or (url.host or "") in LOCAL_DB_HOSTS:
+        return
+    password = url.password or ""
+    if password.lower() in WEAK_DB_PASSWORDS or len(password) < MIN_DB_PASSWORD:
+        raise ConfigError(
+            f"DATABASE_URL uses a weak password for {url.host}: use at least "
+            f"{MIN_DB_PASSWORD} random characters (openssl rand -hex 24) and set the same "
+            "value in POSTGRES_PASSWORD. See docs/DEPLOYMENT.md."
+        )
+
 
 def publishing_env() -> tuple[tuple[str, ...], str]:
     """(enabled providers, PUBLISHING_KEY). Shared by the API and the worker, which must agree.
@@ -56,6 +79,11 @@ class ApiSettings:
     media_retention_max_days: int = 0
     # Lifetime of an expiring media link (presigned or signed URL).
     media_link_ttl_s: int = 300
+    # Sign-in and signup throttling (app/api/throttle.py); the proxy limits at the edge too.
+    login_max_failures: int = 10
+    login_ip_max_failures: int = 50
+    login_window_s: int = 900
+    signup_ip_max: int = 10
     # Self-serve sign-up: anyone can create an account plus their own workspace.
     allow_signup: bool = False
     # How long an invitation link stays valid.
@@ -82,6 +110,8 @@ class ApiSettings:
             )
         if not database_url.startswith(("postgresql+psycopg://", "sqlite")):
             raise ConfigError("DATABASE_URL must use postgresql+psycopg://.")
+        if not demo:
+            check_database_credentials(database_url)
 
         jwt_secret = os.environ.get("JWT_SECRET", "").strip()
         if not jwt_secret and demo:
@@ -122,6 +152,10 @@ class ApiSettings:
             media_retention_days=retention,
             media_retention_max_days=ceiling,
             media_link_ttl_s=_int("MEDIA_LINK_TTL_S", 300, 30, 3600),
+            login_max_failures=_int("LOGIN_MAX_FAILURES", 10, 3, 1000),
+            login_ip_max_failures=_int("LOGIN_IP_MAX_FAILURES", 50, 3, 100000),
+            login_window_s=_int("LOGIN_WINDOW_S", 900, 60, 86400),
+            signup_ip_max=_int("SIGNUP_IP_MAX", 10, 1, 100000),
             allow_signup=env_flag("ALLOW_SIGNUP", default=demo),
             invitation_ttl_hours=_int("INVITATION_TTL_HOURS", 168, 1, 720),
             publishing_providers=publishing_env()[0],

@@ -26,9 +26,10 @@ jobs:
         with: { python-version: "3.14", cache: pip }
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
-      - run: pytest -m unit
-      - run: pytest -m integration
-      - run: pytest -m "not live" --cov --cov-report=term-missing
+      - name: Unit tests (seconds; fail fast before the slower run)
+        run: pytest -m unit
+      - name: All tests once, with coverage (unit, integration, PostgreSQL)
+        run: pytest -m "not live" --cov --cov-report=term-missing --durations=15
   web:
     runs-on: ubuntu-latest
     defaults:
@@ -41,6 +42,35 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+  e2e:
+    # The main user journeys in a real browser (Chromium, desktop and phone) against the real
+    # app in demo mode: API, queue, embedded worker, database and the built web app.
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
+    env:
+      REDIS_URL: redis://localhost:6379/0
+      PYTHON: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.14", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run e2e
+        working-directory: frontend
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: playwright-report, path: frontend/playwright-report, retention-days: 7 }
   alerts:
     runs-on: ubuntu-latest
     steps:
@@ -64,6 +94,16 @@ jobs:
         run: docker compose -f compose.demo.yaml up -d --build --wait --wait-timeout 300
       - name: Full demo workflow works without a Gemini key
         run: python3 scripts/demo_check.py http://localhost:8081
+      - name: The one-shot migration finished cleanly and is not reported unhealthy
+        run: |
+          state=$(docker inspect -f '{{.State.ExitCode}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "$(docker compose -f compose.demo.yaml ps -a -q migrate)")
+          echo "migrate: $state"; test "$state" = "0 none"
+      - name: The production stack refuses to start without a database password
+        run: |
+          if POSTGRES_PASSWORD= docker compose -f compose.yaml config -q 2>/dev/null; then
+            echo "compose.yaml accepted an empty POSTGRES_PASSWORD"; exit 1; fi
+          POSTGRES_PASSWORD=ci-only-strong-password-0123456789 docker compose -f compose.yaml config -q
       - name: Demo mode refuses to run next to a real key
         run: |
           if docker run --rm -e DEMO_MODE=1 -e GEMINI_API_KEY=not-a-real-key mediaflow:latest \

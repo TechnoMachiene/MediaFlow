@@ -212,22 +212,25 @@ def test_signup_creates_a_new_workspace_only_when_enabled(make_rt, tmp_path):
         )
         body = {"email": "founder@example.com", "password": "a-very-long-test-password",
                 "workspace_name": "  Acme Social  "}
-        with TestClient(application) as client:
-            response = client.post("/api/v1/auth/signup", json=body)
-            assert client.get("/api/v1/meta").json()["allow_signup"] is allow
-            if not allow:
-                assert response.status_code == 404
-                continue
-            assert response.status_code == 201, response.text
-            headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
-            me = client.get("/api/v1/auth/me", headers=headers).json()
-            assert me["workspace"]["name"] == "Acme Social" and me["role"] == "admin"
-            assert client.post("/api/v1/auth/signup", json=body).status_code == 409
+        try:
+            with TestClient(application) as client:
+                response = client.post("/api/v1/auth/signup", json=body)
+                assert client.get("/api/v1/meta").json()["allow_signup"] is allow
+                if not allow:
+                    assert response.status_code == 404
+                    continue
+                assert response.status_code == 201, response.text
+                headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+                me = client.get("/api/v1/auth/me", headers=headers).json()
+                assert me["workspace"]["name"] == "Acme Social" and me["role"] == "admin"
+                assert client.post("/api/v1/auth/signup", json=body).status_code == 409
 
-            second = client.post("/api/v1/workspaces", headers=headers, json={"name": "Side"})
-            assert second.status_code == 201 and second.json()["role"] == "admin"
-            assert len(client.get("/api/v1/workspaces", headers=headers).json()) == 2
-        engine.dispose()
+                second = client.post("/api/v1/workspaces", headers=headers,
+                                     json={"name": "Side"})
+                assert second.status_code == 201 and second.json()["role"] == "admin"
+                assert len(client.get("/api/v1/workspaces", headers=headers).json()) == 2
+        finally:
+            engine.dispose()  # also on `continue` and on a failed assertion
 
 
 def test_workspace_creation_is_for_platform_admins_when_signup_is_closed(tenants):

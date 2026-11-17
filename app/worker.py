@@ -263,8 +263,11 @@ class Worker:
             out = self.process_one()
             counts[out] = counts.get(out, 0) + 1
             if out == "idle":
-                if self.queue.depths()["deferred"] == 0:
-                    idle += 1
+                depths = self.queue.depths()
+                if depths["deferred"] == 0:
+                    if depths["processing"] == 0:
+                        break  # nothing ready, deferred or in flight: empty, nothing to wait for
+                    idle += 1  # another worker holds a lease; wait a few rounds, not forever
                 time.sleep(poll_s)
             else:
                 idle = 0

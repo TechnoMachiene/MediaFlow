@@ -84,7 +84,8 @@ reconciler and media retention. Only the API is published, on **port 8080**; Pos
 Redis stay on the private Compose network, so they never clash with local installs.
 
 ```bash
-cp -n .env.example .env              # set GEMINI_API_KEY, GEMINI_MODEL, JWT_SECRET (openssl rand -hex 32)
+cp -n .env.example .env              # set GEMINI_API_KEY, GEMINI_MODEL, JWT_SECRET (openssl rand -hex 32),
+                                     # and POSTGRES_PASSWORD (openssl rand -hex 24): required
 make docker-up                       # build, migrate, start, wait until healthy
 make docker-admin EMAIL=you@example.com   # create the first admin (prompts for a password)
 open http://localhost:8080
@@ -99,10 +100,12 @@ open http://localhost:8080
 | Change the port | `MEDIAFLOW_PORT=9000` in `.env` |
 
 Compose reads `.env` only to fill in variables. `DATABASE_URL` and `REDIS_URL` are set by
-Compose to point at its own containers, and `.env` is never copied into the image. Set
-`POSTGRES_PASSWORD` in `.env` before the first start; it defaults to `mediaflow`, which is
-acceptable only because PostgreSQL is not published. Originals live in the `uploads` volume;
-for several hosts, use `MEDIA_STORAGE=s3` instead.
+Compose to point at its own containers, and `.env` is never copied into the image.
+`POSTGRES_PASSWORD` has no default: Compose refuses to start without it, and the app refuses a
+weak one for any database that isn't on localhost. Originals live in the `uploads` volume;
+for several hosts, use `MEDIA_STORAGE=s3` instead. For a public host, follow
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): HTTPS and rate limits (`compose.proxy.yaml`), secrets,
+and tested backup and restore scripts.
 
 ## Observability
 
@@ -172,6 +175,22 @@ signal, the SLOs, and how to trace a single user's job.
 - Includes automated unit and integration tests that use synthetic media and a scripted Gemini
   client, plus a Vitest + Testing Library suite for the web app; live Gemini tests are separate.
 - Runs in a zero-setup demo mode with an offline draft writer.
+
+## What is verified, and how
+
+Precisely what the automated checks exercise, and what they don't:
+
+| Area | Verified by | Not verified |
+|---|---|---|
+| Queue, worker, retries, crash recovery | Integration tests on real Redis, one per crash point ([docs/JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md)) | |
+| Gemini | The client's request handling, error mapping and video upload flow, against a stubbed SDK; every pipeline test uses a scripted stand-in | **Real Gemini responses.** One live smoke test (`make live`, one small image) runs only with your key; it is not run in CI. Draft quality is not tested |
+| Video | Validation, and the compression decision with ffmpeg stubbed | Real ffmpeg compression of real videos |
+| Publishing | The sandbox provider end to end: OAuth with PKCE, delivery, every failure type, crash safety ([docs/PUBLISHING.md](docs/PUBLISHING.md)) | **No real social platform**: none is implemented. One will be added only after it passes the readiness checklist |
+| Object storage | Local disk; S3 behaviour against `moto` (an emulator): presigned links, encryption, bucket checks | A real AWS, R2 or MinIO bucket |
+| Database | SQLite for most tests; PostgreSQL 17 in CI for the full migration chain and the audit trail's trigger | |
+| Tenancy and security | A route-by-route cross-tenant sweep, audit-trail and throttle tests | An external penetration test |
+| Web app | Component tests (Vitest); **real-browser end-to-end tests** (Playwright, Chromium on desktop and phone) of the main journey and the revision loop, against the real app in demo mode | Firefox and Safari; the UI with real Gemini drafts |
+| Deployment | In CI: the demo stack from a clean checkout and its HTTP workflow, a clean one-shot migration, the production stack refusing an empty database password. By hand: the nginx proxy (redirect, headers, rate limits, forwarded address) and a full backup and restore drill | Real certificates and DNS; the drills are not automated in CI |
 
 ## What it does not do
 
@@ -583,6 +602,8 @@ See [.env.example](./.env.example). Common settings:
 | `ALLOW_SIGNUP` | Self-serve sign-up that creates a workspace; default off. |
 | `PUBLISHING_PROVIDERS` | Enabled publishing providers, comma-separated; default `mock` (the sandbox), `none` disables. |
 | `PUBLISHING_KEY` | Fernet key encrypting publishing credentials; derived from `JWT_SECRET` if unset (set it in production). |
+| `LOGIN_MAX_FAILURES`, `LOGIN_IP_MAX_FAILURES`, `LOGIN_WINDOW_S`, `SIGNUP_IP_MAX` | Sign-in and signup throttling: defaults 10 per account and 50 per address in 15 minutes; 10 signups an hour per address. |
+| `FORWARDED_ALLOW_IPS` | Proxies whose `X-Forwarded-For` uvicorn trusts; `compose.proxy.yaml` sets it. |
 | `INVITATION_TTL_HOURS` | How long an invitation link stays valid; default 168 (7 days), 1–720. |
 | `EMBEDDED_WORKER` | Run a queue worker inside the API process; default off. |
 | `DEMO_MODE` | Offline drafts, SQLite, embedded worker and demo accounts; never in production. |
@@ -600,12 +621,23 @@ source .venv/bin/activate
 export REDIS_URL=redis://localhost:6379/0
 
 make lint          # Ruff
-make unit          # unit tests
+make unit          # unit tests (seconds)
 make integration   # Redis-backed integration tests
-make cov           # all non-live tests plus coverage (85% minimum)
-make done          # lint, unit, integration, and coverage
+make cov           # all non-live tests once, plus coverage (85% minimum; about 2 minutes)
+make done          # lint, unit, and coverage
 make web-test      # web app: Vitest + Testing Library (also run in CI)
+make e2e           # real browser (Chromium, desktop and phone) against the real app; see below
 ```
+
+`make e2e` runs Playwright (`frontend/e2e/`) against the actual app in demo mode
+(`scripts/e2e_server.py`: real API, queue, embedded worker and database, offline drafts) with a
+fresh database and Redis prefix per run, removed afterwards. It covers the main journey (upload,
+draft, approval, schedule, calendar) and the revision loop (reject with a reason, edit, back to
+review). It needs Redis and, once, `cd frontend && npx playwright install chromium`.
+
+Tests use a minimal-cost Argon2 hasher (production keeps the recommended parameters) and
+return from `drain()` as soon as the queue is empty, which keeps the whole suite near two
+minutes.
 
 The web app tests (`frontend/src/**/*.test.ts(x)`) cover job-state and calendar logic, the API
 client (auth and workspace headers, 401 handling, error messages, pagination), sign-in, demo
@@ -650,10 +682,16 @@ clean up tests.
 
 ## Deployment notes
 
-Not yet a fully hardened public deployment. Put it behind HTTPS and a reverse proxy with
-request-size and authentication rate limits before exposing it publicly, especially with
-`ALLOW_SIGNUP=1`, since every new workspace can spend your Gemini quota. Use strong secrets,
-secure PostgreSQL/Redis, run at least one `make worker` with `DATABASE_URL` set (it runs the
-reconciler and retention), persist the media directory or use S3, back up the database, and
-review the retention settings and run `python -m app.cli storage-check` (see
-docs/STORAGE.md). Protect `.env` and any uploaded media as sensitive data.
+Follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before exposing MediaFlow on the internet:
+
+- **HTTPS and edge rate limits:** `compose.proxy.yaml` puts nginx in front (TLS, HSTS, per-address
+  limits on sign-in and the API), and the API is no longer published. The API also throttles
+  sign-in and signup itself.
+- **Secrets:** a strong `POSTGRES_PASSWORD` is required; `JWT_SECRET` and `PUBLISHING_KEY` too.
+- **Backups:** `scripts/backup.sh` and `scripts/restore.sh` (database and originals), with a
+  restore drill that has been run end to end.
+- **Operations:** run at least one worker with `DATABASE_URL` set (reconciler, retention,
+  publishing), monitor it ([docs/OPERATIONS.md](docs/OPERATIONS.md)), and keep `ALLOW_SIGNUP=0`
+  unless strangers may spend your Gemini quota.
+
+Protect `.env`, backups and uploaded media as sensitive data.

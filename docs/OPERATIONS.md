@@ -242,6 +242,7 @@ goes on SQL (look for many `SELECT postgresql` spans, an N+1) or Redis.
 | One repair sweep now | `docker compose exec worker python -m app.cli reconcile` |
 | Apply retention now | `docker compose exec worker python -m app.cli prune-media` (add `--dry-run` to only count) |
 | Check the media store | `docker compose exec worker python -m app.cli storage-check` |
+| Back up / restore | `scripts/backup.sh`, `scripts/restore.sh <dir> --yes` (see [DEPLOYMENT.md](DEPLOYMENT.md)) |
 | More workers | `docker compose up -d --scale worker=3` (Prometheus finds them automatically) |
 | Reload alert rules after editing | `curl -X POST localhost:9090/-/reload` |
 | Test alert rules | `docker run --rm --entrypoint promtool -v "$PWD/ops/prometheus:/p" -w /p prom/prometheus:v3.7.0 test rules alerts_test.yml` |

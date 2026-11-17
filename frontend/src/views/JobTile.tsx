@@ -7,7 +7,7 @@ export function JobTile({
 }: { job: Job; onOpen: () => void; showSubmitter?: boolean }) {
   const title = headline(job.result?.text, job.original_filename);
   return (
-    <button type="button" className="tile" onClick={onOpen}>
+    <button type="button" className="tile" onClick={onOpen} title={job.original_filename}>
       <Thumb jobId={job.job_id} kind={job.media_kind} />
       <span className="tile-body">
         <span className="tile-title" dir="auto">{title}</span>

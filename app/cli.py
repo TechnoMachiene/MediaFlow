@@ -101,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
         configure_tracing(service)
     try:
         rt = build_runtime(Settings.from_env())
+        if args.cmd in ("worker", "reconcile", "prune-media") and _database_url() \
+                and not env_flag("DEMO_MODE"):
+            from app.api.config import check_database_credentials
+
+            check_database_credentials(_database_url())  # the same rule as the API
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
