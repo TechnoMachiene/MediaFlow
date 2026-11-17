@@ -91,7 +91,8 @@ workspace and job ids are never labels.
 | `mediaflow_http_requests_total{method,route,status}`, `mediaflow_http_request_duration_seconds` | counter, histogram | API traffic and latency |
 | `mediaflow_publish_outcomes_total{provider,outcome}` | counter | Publishing delivery outcomes (published, processing, retry, rejected, authorization, unknown_outcome, ...); see [PUBLISHING.md](PUBLISHING.md) |
 | `mediaflow_jobs_accepted_total{status}` | counter | Uploads by dispatch result (queued, waiting, done = cache hit, dispatch_deferred = row saved but Redis unreachable, so the reconciler dispatches it; replayed = retry answered via `Idempotency-Key`) |
-| `mediaflow_retention_purged_total` | counter | Originals deleted by the retention policy |
+| `mediaflow_retention_purged_total` | counter | Stored objects deleted because no job still uses them |
+| `mediaflow_media_deletions_total{reason}` | counter | Job originals deleted: `policy`, `published`, `manual`, `rejected_job` (see [STORAGE.md](STORAGE.md)) |
 | `mediaflow_redis_up` | gauge | Redis answered the last scrape |
 | `mediaflow_workers_alive` | gauge | Workers with a current heartbeat in Redis, including embedded workers that Prometheus can't discover |
 
@@ -235,7 +236,8 @@ goes on SQL (look for many `SELECT postgresql` spans, an N+1) or Redis.
 |---|---|
 | Queue and quota at a glance | `docker compose exec worker python -m app.cli stats` |
 | One repair sweep now | `docker compose exec worker python -m app.cli reconcile` |
-| Apply retention now | `docker compose exec worker python -m app.cli prune-media` |
+| Apply retention now | `docker compose exec worker python -m app.cli prune-media` (add `--dry-run` to only count) |
+| Check the media store | `docker compose exec worker python -m app.cli storage-check` |
 | More workers | `docker compose up -d --scale worker=3` (Prometheus finds them automatically) |
 | Reload alert rules after editing | `curl -X POST localhost:9090/-/reload` |
 | Test alert rules | `docker run --rm --entrypoint promtool -v "$PWD/ops/prometheus:/p" -w /p prom/prometheus:v3.7.0 test rules alerts_test.yml` |

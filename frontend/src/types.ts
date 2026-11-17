@@ -156,6 +156,25 @@ export interface SandboxFeed {
   requests: { account_name: string; kind: string; outcome: string; created_at: string }[];
 }
 
+export interface RetentionPolicy {
+  originals_days: number | null;
+  delete_after_publish: boolean;
+  rejected_days: number | null;
+}
+
+export interface RetentionPreview {
+  originals_expired: number;
+  originals_published: number;
+  rejected_deleted: number;
+}
+
+export interface RetentionView extends RetentionPolicy {
+  effective_originals_days: number;
+  default_days: number;
+  max_days: number;
+  preview: RetentionPreview;
+}
+
 export interface Meta {
   demo_mode: boolean;
   allow_signup: boolean;
@@ -176,6 +195,8 @@ export interface Job {
   approval_status: Approval;
   /** Which version of the draft `result` holds; 1 is Gemini's. */
   draft_version?: number;
+  /** Set once this job's original was deleted. */
+  media_deleted_reason?: 'policy' | 'published' | 'manual' | null;
   submitter_email: string | null;
   original_filename: string;
   attempts: number;

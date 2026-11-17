@@ -16,9 +16,11 @@ import { Library } from './views/Library';
 import { Publishing, PublishingAuth, readPublishingAuth } from './views/Publishing';
 import { Login } from './views/Login';
 import { Review } from './views/Review';
+import { Settings } from './views/Settings';
 import { Team } from './views/Team';
 
-type Route = 'library' | 'review' | 'calendar' | 'publishing' | 'team' | 'activity' | 'audit';
+type Route = 'library' | 'review' | 'calendar' | 'publishing' | 'team' | 'activity' | 'audit'
+  | 'settings';
 const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boolean; view: () => React.JSX.Element }[] = [
   { id: 'library', label: 'Library', icon: 'library', allow: () => true, view: Library },
   { id: 'review', label: 'Review', icon: 'review', allow: (u) => isReviewer(u.role), view: Review },
@@ -27,6 +29,7 @@ const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boole
   { id: 'team', label: 'Team', icon: 'team', allow: (u) => isReviewer(u.role), view: Team },
   { id: 'activity', label: 'Activity', icon: 'activity', allow: (u) => isAdmin(u.role), view: Activity },
   { id: 'audit', label: 'Audit', icon: 'lock', allow: (u) => isAdmin(u.role), view: Audit },
+  { id: 'settings', label: 'Settings', icon: 'gear', allow: (u) => isAdmin(u.role), view: Settings },
 ];
 
 const readRoute = () => window.location.hash.replace(/^#\/?/, '');

@@ -8,11 +8,16 @@ A *key* names an object inside the backend and is what `media_assets.stored_file
 A *ref* is what the Redis job hash carries to the worker: an absolute path for local storage
 (unchanged from earlier releases) or `s3://bucket/key`. `materialize(ref)` turns either into a
 local file for the duration of one Gemini call.
+
+`link(key, ...)` gives a browser an expiring URL for one object: a presigned GET for S3, so
+bytes go straight from the bucket, or None for local storage, where the API signs its own
+links (app/api/media_links.py). `check()` reports deployment problems (docs/STORAGE.md).
 """
 
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import os
 import re
 import tempfile
@@ -55,6 +60,13 @@ class MediaStorage(Protocol):
 
     def local_path(self, key: str) -> Path | None:
         """A path the API can serve directly, or None for remote backends."""
+
+    def link(self, key: str, *, filename: str, content_type: str, ttl_s: int) -> str | None:
+        """An expiring URL a browser can fetch the object from, or None if the API must sign
+        its own."""
+
+    def check(self) -> list[dict]:
+        """Deployment findings: [{"level": "ok" | "warn" | "error", "check", "detail"}]."""
 
 
 class LocalStorage:
@@ -108,24 +120,52 @@ class LocalStorage:
     def local_path(self, key: str) -> Path | None:
         return self.directory / key
 
+    def link(self, key: str, *, filename: str, content_type: str, ttl_s: int) -> str | None:
+        return None
+
+    def check(self) -> list[dict]:
+        ok = self.directory.is_dir() and os.access(self.directory, os.W_OK)
+        return [{
+            "level": "ok" if ok else "error", "check": "directory",
+            "detail": f"{self.directory} is {'writable' if ok else 'missing or not writable'}",
+        }]
+
 
 class S3Storage:
-    def __init__(self, bucket: str, *, prefix: str = "", client=None, **client_kw):
-        if client is None:
+    def __init__(self, bucket: str, *, prefix: str = "", client=None, public_client=None,
+                 public_endpoint_url: str = "", sse: str = "", sse_kms_key_id: str = "",
+                 **client_kw):
+        if client is None or (public_endpoint_url and public_client is None):
             try:
                 import boto3
+                from botocore.config import Config
             except ImportError:  # pragma: no cover - boto3 ships in requirements.txt
                 raise ConfigError("MEDIA_STORAGE=s3 needs boto3: pip install boto3") from None
-            client = boto3.client("s3", **{k: v for k, v in client_kw.items() if v})
+            kw = {k: v for k, v in client_kw.items() if v}
+            if client is None:  # SigV4 everywhere: presigned links must be V4 to carry expiry
+                client = boto3.client("s3", **kw, config=Config(signature_version="s3v4"))
+            if public_endpoint_url and public_client is None:
+                # Presigning only signs; it never calls this endpoint from the server.
+                public_client = boto3.client(
+                    "s3", **{**kw, "endpoint_url": public_endpoint_url},
+                    config=Config(signature_version="s3v4"),
+                )
         self.s3, self.bucket = client, bucket
+        self.presigner = public_client or client
         self.prefix = prefix.strip("/") + "/" if prefix.strip("/") else ""
+        self.sse, self.sse_kms_key_id = sse, sse_kms_key_id
 
     def save(self, staged: Path, original_filename: str, sha256: str) -> str:
         # Content-addressed: identical bytes always land on the same key, so a retry or a
         # concurrent upload of the same file is a harmless overwrite with identical content.
         suffix = os.path.splitext(safe_filename(original_filename))[1].lower()
         key = f"{self.prefix}{sha256}{suffix}"
-        self.s3.upload_file(str(staged), self.bucket, key)
+        extra = {"ContentType": mimetypes.guess_type(f"x{suffix}")[0] or "application/octet-stream"}
+        if self.sse:
+            extra["ServerSideEncryption"] = self.sse
+            if self.sse == "aws:kms" and self.sse_kms_key_id:
+                extra["SSEKMSKeyId"] = self.sse_kms_key_id
+        self.s3.upload_file(str(staged), self.bucket, key, ExtraArgs=extra)
         return key
 
     def exists(self, key: str) -> bool:
@@ -168,6 +208,86 @@ class S3Storage:
     def local_path(self, key: str) -> Path | None:
         return None
 
+    def link(self, key: str, *, filename: str, content_type: str, ttl_s: int) -> str | None:
+        safe = safe_filename(filename).replace('"', "")
+        return self.presigner.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": self.bucket, "Key": key,
+                "ResponseContentType": content_type,
+                "ResponseContentDisposition": f'inline; filename="{safe}"',
+                "ResponseCacheControl": f"private, max-age={ttl_s}",
+            },
+            ExpiresIn=ttl_s,
+        )
+
+    def check(self) -> list[dict]:
+        """What a deletion policy depends on: deleted objects must really be gone (no
+        versioning, or a lifecycle rule that expires old versions), the bucket must not be
+        public (links are the only way in), and objects should be encrypted at rest."""
+        out: list[dict] = []
+
+        def add(level, check, detail):
+            out.append({"level": level, "check": check, "detail": detail})
+
+        def code(err):
+            return getattr(err, "response", {}).get("Error", {}).get("Code", "")
+
+        try:
+            self.s3.head_bucket(Bucket=self.bucket)
+            add("ok", "bucket", f"{self.bucket} is reachable")
+        except Exception as err:
+            add("error", "bucket", f"{self.bucket} is not reachable: {code(err) or err}")
+            return out
+
+        versioning = self.s3.get_bucket_versioning(Bucket=self.bucket).get("Status")
+        if versioning in ("Enabled", "Suspended"):
+            rules = []
+            try:
+                rules = self.s3.get_bucket_lifecycle_configuration(Bucket=self.bucket)["Rules"]
+            except Exception as err:
+                if code(err) != "NoSuchLifecycleConfiguration":
+                    raise
+            expires_old = any(r.get("Status") == "Enabled" and (
+                "NoncurrentVersionExpiration" in r) for r in rules)
+            add("ok" if expires_old else "warn", "versioning",
+                f"versioning is {versioning}; " + (
+                    "a lifecycle rule expires noncurrent versions" if expires_old else
+                    "deleted originals stay recoverable as old versions: add a lifecycle rule "
+                    "with NoncurrentVersionExpiration"))
+        else:
+            add("ok", "versioning", "versioning is off, so deleted objects are gone")
+
+        try:
+            block = self.s3.get_public_access_block(Bucket=self.bucket)[
+                "PublicAccessBlockConfiguration"]
+            public_ok = all(block.get(k) for k in (
+                "BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy",
+                "RestrictPublicBuckets"))
+        except Exception as err:
+            if code(err) not in ("NoSuchPublicAccessBlockConfiguration", "NotImplemented"):
+                raise
+            public_ok = False
+        add("ok" if public_ok else "warn", "public_access",
+            "public access is fully blocked" if public_ok else
+            "public access is not fully blocked; media must only be reachable by signed links")
+
+        try:
+            rules = self.s3.get_bucket_encryption(Bucket=self.bucket)[
+                "ServerSideEncryptionConfiguration"]["Rules"]
+            default = rules[0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"]
+        except Exception as err:
+            if code(err) not in ("ServerSideEncryptionConfigurationNotFoundError",
+                                 "NotImplemented"):
+                raise
+            default = ""
+        if self.sse or default:
+            add("ok", "encryption",
+                f"new uploads are encrypted ({self.sse or default})")
+        else:
+            add("warn", "encryption", "no default encryption; set S3_SSE or a bucket default")
+        return out
+
 
 def build_storage(
     backend: str,
@@ -177,6 +297,9 @@ def build_storage(
     s3_prefix: str = "",
     s3_endpoint_url: str = "",
     s3_region: str = "",
+    s3_public_endpoint_url: str = "",
+    s3_sse: str = "",
+    s3_sse_kms_key_id: str = "",
 ) -> MediaStorage:
     if backend == "local":
         return LocalStorage(local_dir)
@@ -184,7 +307,9 @@ def build_storage(
         if not s3_bucket:
             raise ConfigError("MEDIA_STORAGE=s3 needs S3_BUCKET.")
         return S3Storage(
-            s3_bucket, prefix=s3_prefix, endpoint_url=s3_endpoint_url, region_name=s3_region
+            s3_bucket, prefix=s3_prefix, endpoint_url=s3_endpoint_url, region_name=s3_region,
+            public_endpoint_url=s3_public_endpoint_url, sse=s3_sse,
+            sse_kms_key_id=s3_sse_kms_key_id,
         )
     raise ConfigError(f"MEDIA_STORAGE must be 'local' or 's3', got {backend!r}")
 
@@ -197,4 +322,7 @@ def storage_from_env() -> MediaStorage:
         s3_prefix=os.environ.get("S3_PREFIX", "").strip(),
         s3_endpoint_url=os.environ.get("S3_ENDPOINT_URL", "").strip(),
         s3_region=os.environ.get("S3_REGION", "").strip(),
+        s3_public_endpoint_url=os.environ.get("S3_PUBLIC_ENDPOINT_URL", "").strip(),
+        s3_sse=os.environ.get("S3_SSE", "").strip(),
+        s3_sse_kms_key_id=os.environ.get("S3_SSE_KMS_KEY_ID", "").strip(),
     )

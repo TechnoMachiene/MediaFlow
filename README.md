@@ -150,8 +150,9 @@ signal, the SLOs, and how to trace a single user's job.
   [docs/AUDIT.md](docs/AUDIT.md)).
 - Supports members, managers and admins per workspace, platform admins, and a protected
   super-admin account.
-- Stores originals on local disk or any S3-compatible bucket, and applies a media retention
-  policy (originals deleted after 30 idle days by default; drafts kept).
+- Stores originals on local disk or any S3-compatible bucket (optionally encrypted), serves them
+  through short-lived signed or presigned links, and applies per-workspace deletion policies
+  (originals after 30 days by default, after publishing, rejected drafts; drafts kept).
 - Lets managers/admins review completed work and approve or reject it, with a **draft editor**:
   the uploader and reviewers edit drafts field by field, every save is a version (with a
   field-level diff and one-click restore), concurrent saves can't overwrite each other, and
@@ -458,7 +459,11 @@ The full model, role matrix and invitation security properties are in
 | `GET /jobs/mine` | Authenticated | List the caller's jobs with processing and approval statuses; supports `limit` and `offset`. |
 | `GET /jobs/{job_id}` | Owner/manager/admin | Get a job's current status and result; non-admins can access their own jobs. |
 | `DELETE /jobs/{job_id}` | Owner/manager/admin | Cancel an owned job when it has not started processing. |
-| `GET /jobs/{job_id}/media` | Owner/manager/admin | Download the protected original upload; `410` once retention deleted it. |
+| `GET /jobs/{job_id}/media` | Owner/manager/admin | Download the protected original upload; `410` (with the reason) once it was deleted. |
+| `POST /jobs/{job_id}/media-link` | Owner/manager/admin | An expiring URL for the original (presigned S3, or signed). |
+| `DELETE /jobs/{job_id}/media` | Owner/admin | Delete this job's original now; drafts are kept. |
+| `GET`, `PUT /workspaces/{id}/retention` | Admin of it | The workspace's deletion policy, with a preview of what the next run deletes. |
+| `POST /workspaces/{id}/retention/preview` | Admin of it | What a proposed policy would delete, without saving it. |
 | `GET /jobs/review` | Manager/admin | List completed jobs awaiting review. |
 | `GET /jobs/approved` | Manager/admin | List completed, approved jobs. |
 | `GET /jobs/rejected` | Manager/admin | List completed, rejected jobs. |
@@ -540,12 +545,16 @@ repair sweep by hand with `make reconcile`.
 |---|---|
 | `MEDIA_STORAGE=local` (default) | Originals in `MEDIA_STORAGE_DIR`; API and workers must share it. |
 | `MEDIA_STORAGE=s3` + `S3_BUCKET` | Originals in any S3-compatible bucket (AWS, R2, MinIO via `S3_ENDPOINT_URL`). Workers download a temporary copy per job. |
-| `MEDIA_RETENTION_DAYS=30` (default) | Delete an original once nobody has uploaded those bytes for 30 days, no job using it is active, and no upcoming scheduled post uses it. `0` keeps originals forever. |
+| `MEDIA_RETENTION_DAYS=30` (default) | Default policy: a job's original is deleted 30 days after its upload or calendar date. Each workspace can choose its own, within `MEDIA_RETENTION_MAX_DAYS`. `0` keeps originals forever. |
 
-Retention deletes originals only. Drafts, approvals and calendar entries are kept, and the
-media URL answers `410 Gone`. Uploading the same file again restores it. Workers apply the
-policy hourly; run it once with `make prune-media`. Abandoned partial uploads more than a day
-old are removed too.
+Browsers reach originals only through **expiring links**: presigned S3 URLs, or links the API
+signs for local storage (`MEDIA_LINK_TTL_S`, default 5 minutes). Workspace admins set a
+**deletion policy** under Settings: how long originals are kept, whether they go once
+published, and whether rejected drafts are deleted, with a preview of what a change would
+delete. Drafts, approvals and calendar entries are kept, every deletion is audited, and
+bytes shared by several workspaces are deleted only when the last one lets go. Check a bucket
+is ready (versioning, public access, encryption) with `python -m app.cli storage-check`. Full
+details: [docs/STORAGE.md](docs/STORAGE.md).
 
 ## Configuration
 
@@ -560,7 +569,11 @@ See [.env.example](./.env.example). Common settings:
 | `ACCESS_TOKEN_TTL_MINUTES` | JWT lifetime; defaults to 30 minutes. |
 | `MEDIA_STORAGE_DIR` | Persistent upload storage directory; defaults to `uploads`. Also the staging area for S3 uploads. |
 | `MEDIA_STORAGE`, `S3_BUCKET`, `S3_PREFIX`, `S3_ENDPOINT_URL`, `S3_REGION` | Where originals live: `local` or `s3`. |
-| `MEDIA_RETENTION_DAYS` | Days an unused original is kept; default 30, `0` keeps forever. |
+| `MEDIA_RETENTION_DAYS` | Default days a job's original is kept; default 30, `0` keeps forever. Workspaces may choose their own. |
+| `MEDIA_RETENTION_MAX_DAYS` | Ceiling on what a workspace may choose; default `0` (no ceiling). |
+| `MEDIA_LINK_TTL_S` | Lifetime of an expiring media link; default 300 (30–3600). |
+| `S3_PUBLIC_ENDPOINT_URL` | Host for presigned links when browsers reach the store at a different address than the servers. |
+| `S3_SSE`, `S3_SSE_KMS_KEY_ID` | Server-side encryption for new uploads: `AES256` or `aws:kms`. |
 | `ALLOW_SIGNUP` | Self-serve sign-up that creates a workspace; default off. |
 | `PUBLISHING_PROVIDERS` | Enabled publishing providers, comma-separated; default `mock` (the sandbox), `none` disables. |
 | `PUBLISHING_KEY` | Fernet key encrypting publishing credentials; derived from `JWT_SECRET` if unset (set it in production). |
@@ -610,7 +623,8 @@ clean up tests.
 | `frontend/` | React web app; `npm run build` writes `frontend/dist`, which the API serves. |
 | `app/api/` | FastAPI routes, authentication, workspaces, schemas, database models, and the media registry. |
 | `app/api/reconcile.py` | DB↔Redis reconciler and the shared job-dispatch step. |
-| `app/api/retention.py` | Media retention policy. |
+| `app/api/retention.py` | Per-workspace deletion policies and object collection (docs/STORAGE.md). |
+| `app/api/media_links.py` | Expiring signed media links. |
 | `app/storage.py` | Local and S3-compatible media storage backends. |
 | `app/obs/` | Structured logging, correlation ids, tracing (incl. across the queue), metrics. |
 | `ops/` | Prometheus scrape config, alert rules and their tests, Grafana provisioning and dashboard. |
@@ -635,4 +649,5 @@ request-size and authentication rate limits before exposing it publicly, especia
 `ALLOW_SIGNUP=1`, since every new workspace can spend your Gemini quota. Use strong secrets,
 secure PostgreSQL/Redis, run at least one `make worker` with `DATABASE_URL` set (it runs the
 reconciler and retention), persist the media directory or use S3, back up the database, and
-review `MEDIA_RETENTION_DAYS`. Protect `.env` and any uploaded media as sensitive data.
+review the retention settings and run `python -m app.cli storage-check` (see
+docs/STORAGE.md). Protect `.env` and any uploaded media as sensitive data.

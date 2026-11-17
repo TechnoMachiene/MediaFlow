@@ -27,6 +27,7 @@ from app.api.database import (
     AuditEvent,
     DraftComment,
     DraftVersion,
+    MediaAsset,
     Publication,
     PublishingConnection,
     ScheduledPost,
@@ -149,7 +150,12 @@ def snapshot(w: World) -> dict:
             out[model.__tablename__] = sorted(
                 repr({c.name: getattr(r, c.name) for c in model.__table__.columns}) for r in rows
             )
-        out["workspace"] = db.get(Workspace, "ws-a").name
+        ws = db.get(Workspace, "ws-a")
+        out["workspace"] = repr({c.name: getattr(ws, c.name) for c in Workspace.__table__.columns})
+        shas = select(ApiJob.media_sha256).where(ApiJob.workspace_id == "ws-a")
+        out["objects"] = sorted(
+            (a.sha256, a.stored_filename, a.purged_at)
+            for a in db.scalars(select(MediaAsset).where(MediaAsset.sha256.in_(shas))))
         out["accounts"] = sorted(
             (u.email, u.password_hash, u.token_version, u.role)
             for u in db.scalars(select(User).where(
@@ -209,6 +215,14 @@ SCOPED = [
            {"name": "Taken over"}, "anna"),
     Scoped("POST", "/workspaces/{workspace_id}/leave", {"workspace_id": "workspace"}, None,
            "carl", 204),
+    Scoped("POST", "/jobs/{job_id}/media-link", {"job_id": "approved"}, None, "alice"),
+    Scoped("DELETE", "/jobs/{job_id}/media", {"job_id": "pending"}, None, "alice", 204),
+    Scoped("GET", "/workspaces/{workspace_id}/retention", {"workspace_id": "workspace"}, None,
+           "anna"),
+    Scoped("POST", "/workspaces/{workspace_id}/retention/preview",
+           {"workspace_id": "workspace"}, {"originals_days": 1}, "anna"),
+    Scoped("PUT", "/workspaces/{workspace_id}/retention", {"workspace_id": "workspace"},
+           {"originals_days": 1, "delete_after_publish": True}, "anna"),
     Scoped("DELETE", "/publishing/connections/{connection_id}", {"connection_id": "conn"},
            None, "anna"),
     Scoped("GET", "/scheduled-posts/{post_id}/publications", {"post_id": "post"}, None,
@@ -264,7 +278,7 @@ def test_every_route_is_classified(world):
         if path.startswith("/api/v1")
         for method in operations
     }
-    assert len(routes) >= 53  # sanity: the enumeration really found the API
+    assert len(routes) >= 58  # sanity: the enumeration really found the API
     classified = (
         {(s.method, s.path) for s in SCOPED} | {("GET", p) for p in LISTS} | UNSCOPED
     )

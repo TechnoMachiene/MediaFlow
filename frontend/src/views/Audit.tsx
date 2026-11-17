@@ -6,7 +6,7 @@ import type { AuditEvent, AuditPage, Role } from '../types';
 import { Button, Empty, ErrorNote, PageHeader, Segmented, Spinner } from '../ui';
 
 type Category = 'all' | 'member' | 'invitation' | 'job' | 'draft' | 'post' | 'connection'
-  | 'publication' | 'workspace';
+  | 'publication' | 'media' | 'workspace';
 const CATEGORIES: { value: Category; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'member', label: 'People' },
@@ -16,6 +16,7 @@ const CATEGORIES: { value: Category; label: string }[] = [
   { value: 'post', label: 'Calendar' },
   { value: 'publication', label: 'Publishing' },
   { value: 'connection', label: 'Accounts' },
+  { value: 'media', label: 'Deletions' },
   { value: 'workspace', label: 'Workspace' },
 ];
 
@@ -59,6 +60,12 @@ export function describe(e: AuditEvent): string {
     case 'publication.requested': return `${who} set a post to publish to ${what}`;
     case 'publication.retried': return `${who} sent a post to ${what} again`;
     case 'publication.cancelled': return `${who} cancelled publishing a post to ${what}`;
+    case 'media.deleted':
+      return a.reason === 'manual' ? `${who} deleted the original of ${what}`
+        : a.reason === 'published' ? `The retention policy deleted the original of ${what} after publishing`
+        : `The retention policy deleted the original of ${what} (after ${a.days} days)`;
+    case 'job.purged': return `The retention policy deleted the rejected draft ${what} (after ${a.days} days)`;
+    case 'workspace.retention_changed': return `${who} changed the deletion policy`;
     case 'workspace.created': return `${who} created the workspace ${a.name}`;
     case 'workspace.renamed': return `${who} renamed the workspace from ${b.name} to ${a.name}`;
     default: return `${who}: ${e.action} ${what}`;

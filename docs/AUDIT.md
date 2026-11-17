@@ -12,7 +12,7 @@ from. Admins read it per workspace (`GET /api/v1/audit-events`, or **Audit** in 
 | **Only real changes are recorded** | Refused requests (403/404/409) roll back before anything is written. No-ops (setting a role it already has, cancelling twice) record nothing | `test_refused_and_no_op_requests_leave_no_trace` |
 | **History can't be rewritten** | On PostgreSQL, a trigger rejects every `UPDATE` and `DELETE` on `audit_events`, so even the application's own credentials can only append | `tests/integration/test_postgres.py` |
 | **History outlives the people in it** | Actor and target are snapshots (id and email as they were), with no foreign keys to `users`. Deleting an account keeps every event about it | `test_history_survives_deleting_the_people_in_it` |
-| **Out-of-band changes are visible** | The admin CLI (`app.api.admin`) records its changes with the actor `system:cli` | `test_admin_cli_changes_are_audited_as_the_system` |
+| **Out-of-band changes are visible** | The admin CLI (`app.api.admin`) records its changes with the actor `system:cli`; the retention policy records its deletions as `system:retention` | `test_admin_cli_changes_are_audited_as_the_system` |
 | **Tenants see only their own trail** | Events belong to one workspace; only its admins can read them | `test_only_admins_read_the_trail_and_only_their_workspaces` |
 | **Events join logs and traces** | `request_id` is the request's `X-Request-ID`, which is on every log line and the trace for that request | `test_role_change_records_who_whom_before_and_after` |
 
@@ -45,6 +45,9 @@ from. Admins read it per workspace (`GET /api/v1/audit-events`, or **Audit** in 
 | `publication.requested` | A scheduled post was set to publish to an account | → account, time |
 | `publication.retried` | A failed or uncertain publication was sent again | status, error → queued |
 | `publication.cancelled` | A pending publication was cancelled | status → cancelled |
+| `media.deleted` | A job's original was deleted (by policy, after publishing, or on request) | → reason (policy, published, manual), days |
+| `job.purged` | A rejected job was deleted entirely by the retention policy | rejected, decided at → days |
+| `workspace.retention_changed` | The workspace's deletion policy changed | policy → policy |
 | `workspace.created` | The workspace was created | → name, first admin |
 | `workspace.renamed` | The workspace was renamed | name → name |
 <!-- actions:end -->
@@ -64,7 +67,7 @@ than audit events, so the trail stays a record of what actually changed.
 
 | Parameter | Meaning |
 |---|---|
-| `category` | `member`, `invitation`, `job`, `draft`, `post`, `connection`, `publication` or `workspace` |
+| `category` | `member`, `invitation`, `job`, `draft`, `post`, `connection`, `publication`, `media` or `workspace` |
 | `action` | One exact action from the table above (`422` if unknown) |
 | `actor_id` | Everything one person did |
 | `target_id` | One user's, job's or post's whole history |

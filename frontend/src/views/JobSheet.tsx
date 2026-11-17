@@ -19,21 +19,46 @@ export { ContentView } from './Content';
 
 /* ── Media preview ───────────────────────────────────────────────────────── */
 
-function MediaPreview({ job }: { job: Pick<Job, 'job_id' | 'media_kind' | 'original_filename'> }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
-  const isImage = job.media_kind === 'image';
+const GONE: Record<string, string> = {
+  policy: "The original was deleted by this workspace's retention policy. The drafts are kept.",
+  published: 'The original was deleted after publishing, as this workspace asks. The drafts are kept.',
+  manual: 'The original was deleted on request. The drafts are kept.',
+};
 
-  const load = () => {
+function MediaPreview({ job }: {
+  job: Pick<Job, 'job_id' | 'media_kind' | 'original_filename' | 'media_deleted_reason'>;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [state, setState] = useState<'idle' | 'loading' | 'error' | 'gone'>('idle');
+  const [reason, setReason] = useState('');
+  const isImage = job.media_kind === 'image';
+  const resumeAt = useRef(0);
+
+  const load = (fresh = false) => {
     setState('loading');
-    mediaUrl(job.job_id).then(
+    mediaUrl(job.job_id, { fresh }).then(
       (u) => { setUrl(u); setState('idle'); },
-      () => setState('error'),
+      (err) => {
+        const gone = err instanceof ApiError && err.status === 410;
+        setReason(gone ? err.message : '');
+        setState(gone ? 'gone' : 'error');
+      },
     );
+  };
+  // A link that expired mid-video: get a new one and carry on from the same moment.
+  const onVideoError = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    resumeAt.current = e.currentTarget.currentTime;
+    setUrl(null);
+    load(true);
   };
   useEffect(() => {
     setUrl(null);
     setState('idle');
+    if (job.media_deleted_reason) {
+      setReason(GONE[job.media_deleted_reason] ?? GONE.manual);
+      setState('gone');
+      return;
+    }
     if (isImage) load(); // videos can be large, so they load when asked
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job.job_id]);
@@ -41,13 +66,19 @@ function MediaPreview({ job }: { job: Pick<Job, 'job_id' | 'media_kind' | 'origi
   return (
     <div className="preview">
       {url && isImage && <img src={url} alt={`Uploaded image ${job.original_filename}`} />}
-      {url && !isImage && <video src={url} controls playsInline autoPlay />}
+      {url && !isImage && (
+        <video
+          src={url} controls playsInline autoPlay onError={onVideoError}
+          onLoadedMetadata={(e) => { if (resumeAt.current) e.currentTarget.currentTime = resumeAt.current; }}
+        />
+      )}
       {!url && state === 'loading' && <Spinner />}
       {!url && state === 'error' && (
-        <button type="button" className="link" onClick={load}>Couldn't load media. Try again</button>
+        <button type="button" className="link" onClick={() => load()}>Couldn't load media. Try again</button>
       )}
+      {state === 'gone' && <p className="preview-gone">{reason}</p>}
       {!url && state === 'idle' && !isImage && (
-        <button type="button" className="preview-play" onClick={load}>
+        <button type="button" className="preview-play" onClick={() => load()}>
           <Icon name="film" />
           <span>Load video</span>
         </button>
@@ -166,6 +197,8 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
   const canEdit = (owned || isReviewer(user.role)) && job.status === 'done' && !!job.result;
 
   const canCancel = (owned || isAdmin(user.role)) && CANCELLABLE.has(job.status);
+  const canDeleteOriginal = (owned || isAdmin(user.role)) && !job.media_deleted_reason &&
+    !state.active && job.status !== 'cancelled';
   const canReview =
     isReviewer(user.role) && job.status === 'done' && job.approval_status === 'pending';
   const canSchedule = owned && job.status === 'done' && job.approval_status === 'approved';
@@ -204,7 +237,7 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
 
   return (
     <div className="job-detail">
-      <MediaPreview job={job} />
+      <MediaPreview key={job.media_deleted_reason ?? 'live'} job={job} />
 
       <div className="job-meta">
         <JobBadge job={job} />
@@ -262,6 +295,18 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
                 <ConfirmButton label="Cancel job" confirm="Confirm cancel"
                   busy={busy === 'cancel'} onConfirm={cancel} />
               )}
+            </div>
+          )}
+          {canDeleteOriginal && (
+            <div className="job-actions">
+              <ConfirmButton
+                label="Delete original" confirm="Delete the file? Drafts stay"
+                busy={busy === 'delete-original'}
+                onConfirm={() => run('delete-original', async () => {
+                  await api<void>('DELETE', `/jobs/${job.job_id}/media`);
+                  return api<Job>('GET', `/jobs/${job.job_id}`);
+                }, (next) => { onChanged(next); toast('Original deleted. The drafts are kept.'); })}
+              />
             </div>
           )}
           {canReview && rejecting && (

@@ -67,6 +67,11 @@ PUBLISH_OUTCOMES = Counter(
     "Publishing delivery outcomes by provider (published, processing, retry, rejected, "
     "authorization, unknown_outcome, ...).", ["provider", "outcome"],
 )
+MEDIA_DELETIONS = Counter(
+    "mediaflow_media_deletions_total",
+    "Originals removed from jobs, by reason (policy, published, manual, rejected_job).",
+    ["reason"],
+)
 RETENTION_PURGED = Counter(
     "mediaflow_retention_purged_total", "Original uploads deleted by the retention policy."
 )

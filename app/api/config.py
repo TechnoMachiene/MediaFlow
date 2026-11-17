@@ -43,8 +43,19 @@ class ApiSettings:
     s3_prefix: str = ""
     s3_endpoint_url: str = ""
     s3_region: str = ""
-    # Originals idle this long are purged (drafts are kept). 0 keeps originals forever.
+    # Host browsers use for presigned links, when it differs from S3_ENDPOINT_URL (e.g. MinIO
+    # reached as http://minio:9000 inside Compose but https://media.example.com outside).
+    s3_public_endpoint_url: str = ""
+    # Server-side encryption for new uploads: "" (bucket default), "AES256" or "aws:kms".
+    s3_sse: str = ""
+    s3_sse_kms_key_id: str = ""
+    # Default number of days a workspace keeps originals (drafts are kept). 0 keeps them
+    # forever. Workspaces may choose their own value (docs/STORAGE.md).
     media_retention_days: int = 30
+    # Operator ceiling on what a workspace may choose; 0 means no ceiling.
+    media_retention_max_days: int = 0
+    # Lifetime of an expiring media link (presigned or signed URL).
+    media_link_ttl_s: int = 300
     # Self-serve sign-up: anyone can create an account plus their own workspace.
     allow_signup: bool = False
     # How long an invitation link stays valid.
@@ -86,6 +97,15 @@ class ApiSettings:
         bucket = os.environ.get("S3_BUCKET", "").strip()
         if storage == "s3" and not bucket:
             raise ConfigError("MEDIA_STORAGE=s3 needs S3_BUCKET.")
+        sse = os.environ.get("S3_SSE", "").strip()
+        if sse not in ("", "AES256", "aws:kms"):
+            raise ConfigError("S3_SSE must be empty, 'AES256' or 'aws:kms'.")
+        retention = _int("MEDIA_RETENTION_DAYS", 30, 0, 36500)
+        ceiling = _int("MEDIA_RETENTION_MAX_DAYS", 0, 0, 36500)
+        if ceiling and not 1 <= retention <= ceiling:
+            raise ConfigError(
+                "MEDIA_RETENTION_DAYS must be between 1 and MEDIA_RETENTION_MAX_DAYS."
+            )
         return cls(
             database_url=database_url,
             jwt_secret=jwt_secret,
@@ -96,7 +116,12 @@ class ApiSettings:
             s3_prefix=os.environ.get("S3_PREFIX", "").strip(),
             s3_endpoint_url=os.environ.get("S3_ENDPOINT_URL", "").strip(),
             s3_region=os.environ.get("S3_REGION", "").strip(),
-            media_retention_days=_int("MEDIA_RETENTION_DAYS", 30, 0, 36500),
+            s3_public_endpoint_url=os.environ.get("S3_PUBLIC_ENDPOINT_URL", "").strip(),
+            s3_sse=sse,
+            s3_sse_kms_key_id=os.environ.get("S3_SSE_KMS_KEY_ID", "").strip(),
+            media_retention_days=retention,
+            media_retention_max_days=ceiling,
+            media_link_ttl_s=_int("MEDIA_LINK_TTL_S", 300, 30, 3600),
             allow_signup=env_flag("ALLOW_SIGNUP", default=demo),
             invitation_ttl_hours=_int("INVITATION_TTL_HOURS", 168, 1, 720),
             publishing_providers=publishing_env()[0],
@@ -120,4 +145,7 @@ class ApiSettings:
             s3_prefix=self.s3_prefix,
             s3_endpoint_url=self.s3_endpoint_url,
             s3_region=self.s3_region,
+            s3_public_endpoint_url=self.s3_public_endpoint_url,
+            s3_sse=self.s3_sse,
+            s3_sse_kms_key_id=self.s3_sse_kms_key_id,
         )

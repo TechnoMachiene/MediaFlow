@@ -248,6 +248,34 @@ class SandboxFeed(BaseModel):
     requests: list[SandboxRequestView]
 
 
+class MediaLink(BaseModel):
+    url: str
+    expires_at: datetime
+    kind: Literal["presigned", "signed"]
+
+
+class RetentionPolicy(BaseModel):
+    """What an admin sets. `originals_days`: None = installation default, 0 = keep forever.
+    `rejected_days`: None = keep rejected drafts."""
+
+    originals_days: int | None = Field(default=None, ge=0, le=36500)
+    delete_after_publish: bool = False
+    rejected_days: int | None = Field(default=None, ge=1, le=36500)
+
+
+class RetentionPreview(BaseModel):
+    originals_expired: int
+    originals_published: int
+    rejected_deleted: int
+
+
+class RetentionView(RetentionPolicy):
+    effective_originals_days: int  # what applies after defaults and the ceiling (0 = forever)
+    default_days: int
+    max_days: int  # 0 = no ceiling
+    preview: RetentionPreview  # what the next run would delete now
+
+
 class DemoAccount(BaseModel):
     email: str
     role: Role
@@ -382,6 +410,8 @@ class JobView(BaseModel):
     approval_status: Literal["pending", "approved", "rejected"] = "pending"
     # Which version of the draft `result` holds: 1 is Gemini's, higher means edited.
     draft_version: int = 1
+    # Set once this job's original was deleted: policy | published | manual.
+    media_deleted_reason: str | None = None
     submitter_email: EmailStr | None = None
     original_filename: str
     attempts: int = 0

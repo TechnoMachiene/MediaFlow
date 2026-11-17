@@ -116,26 +116,33 @@ export async function fetchJobs(path: string, count: number) {
   return { items, more: true };
 }
 
-/* Media is behind the bearer token, so it can't be an <img src>. Fetch once, keep a blob URL. */
-const media = new Map<string, Promise<string>>();
+/* Media is fetched through short-lived links (presigned S3 URLs, or links the API signs), so
+ * an <img>/<video> can load it directly: streamed, seekable, never held whole in memory. A
+ * link is reused until shortly before it expires. */
+interface Link { url: string; expiresAt: number }
+const media = new Map<string, Promise<Link>>();
+const REUSE_MARGIN_MS = 30_000;
 
-export function mediaUrl(jobId: string): Promise<string> {
-  let hit = media.get(jobId);
-  if (!hit) {
-    hit = fetch(`${BASE}/jobs/${jobId}/media`, { headers: authHeaders() }).then(async (res) => {
-      if (res.status === 401) expire();
-      if (res.status === 410) throw new ApiError(410, 'Original removed by the retention policy');
-      if (!res.ok) throw new ApiError(res.status, 'Media unavailable');
-      return URL.createObjectURL(await res.blob());
-    });
-    hit.catch(() => media.delete(jobId));
-    media.set(jobId, hit);
+export function mediaUrl(jobId: string, { fresh = false } = {}): Promise<string> {
+  let hit = fresh ? undefined : media.get(jobId);
+  if (hit) {
+    const cached = hit;
+    hit = cached.then((link) =>
+      link.expiresAt - Date.now() > REUSE_MARGIN_MS ? link : newLink(jobId));
+  } else {
+    hit = newLink(jobId);
   }
-  return hit;
+  hit.catch(() => media.delete(jobId));
+  media.set(jobId, hit);
+  return hit.then((link) => link.url);
+}
+
+async function newLink(jobId: string): Promise<Link> {
+  const out = await api<{ url: string; expires_at: string }>('POST', `/jobs/${jobId}/media-link`);
+  return { url: out.url, expiresAt: Date.parse(out.expires_at) };
 }
 
 export function clearMedia() {
-  for (const entry of media.values()) entry.then(URL.revokeObjectURL, () => {});
   media.clear();
 }
 

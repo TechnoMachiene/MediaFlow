@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -56,6 +57,16 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
+    # Deletion policy (docs/STORAGE.md). NULL days = the installation default.
+    # Days to keep a job's original after its upload or calendar date; 0 = forever.
+    retention_originals_days: Mapped[int | None] = mapped_column(nullable=True)
+    # Delete the original as soon as every publication of its post succeeded.
+    retention_after_publish: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    # Delete rejected jobs entirely (draft, versions, comments) this many days after the
+    # decision. NULL = keep them.
+    retention_rejected_days: Mapped[int | None] = mapped_column(nullable=True)
 
 
 class WorkspaceMember(Base):
@@ -202,6 +213,14 @@ class ApiJob(Base):
     # The draft version `result` currently holds. 1 is Gemini's draft; each human save adds one
     # (see DraftVersion). Once above 1, nothing from the queue may overwrite `result`.
     draft_version: Mapped[int] = mapped_column(default=1, server_default="1", nullable=False)
+    # When the review decision was made (approve/reject); drives rejected-draft retention.
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # This job's original was deleted (policy | published | manual): its media and links answer
+    # 410 even if other jobs, possibly in other workspaces, still keep the same bytes.
+    media_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    media_deleted_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
     recoveries: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -6,7 +6,8 @@ python -m app.cli worker [--drain]     # with DATABASE_URL: also reconciles DB<-
 python -m app.cli status <job_id>
 python -m app.cli stats
 python -m app.cli reconcile            # one DB<->Redis repair sweep (see docs/JOB_LIFECYCLE.md)
-python -m app.cli prune-media          # apply MEDIA_RETENTION_DAYS once
+python -m app.cli prune-media [--dry-run]  # apply every workspace's deletion policy once
+python -m app.cli storage-check        # bucket/disk readiness for deletion policies (STORAGE.md)
 """
 
 from __future__ import annotations
@@ -43,6 +44,11 @@ def _retention_days() -> int:
     return int(raw) if raw else 30
 
 
+def _retention_max_days() -> int:
+    raw = os.environ.get("MEDIA_RETENTION_MAX_DAYS", "").strip()
+    return int(raw) if raw else 0
+
+
 def _publishing():
     """The worker delivers publications only if it can decrypt the API's credentials, so it
     derives the same key the API does (PUBLISHING_KEY, else JWT_SECRET)."""
@@ -74,8 +80,19 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("job_id")
     sub.add_parser("stats")
     sub.add_parser("reconcile", help="repair DB/Redis divergence once")
-    sub.add_parser("prune-media", help="delete originals past MEDIA_RETENTION_DAYS once")
+    pm = sub.add_parser("prune-media", help="apply every workspace's deletion policy once")
+    pm.add_argument("--dry-run", action="store_true", help="count, delete nothing")
+    sub.add_parser("storage-check", help="check the media store is ready for deletion policies")
     args = ap.parse_args(argv)
+    if args.cmd == "storage-check":
+        # Needs no Gemini or Redis settings: run it before anything else is configured.
+        try:
+            findings = storage_from_env().check()
+        except ConfigError as e:
+            print(f"config error: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(findings, indent=2))
+        return 1 if any(f["level"] == "error" for f in findings) else 0
 
     service = "mediaflow-worker" if args.cmd == "worker" else "mediaflow-cli"
     configure_logging(service)
@@ -109,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             instrument_engine(db_engine)
             configure_worker(
                 rt, session_factory, storage_from_env(), retention_days=_retention_days(),
+                retention_max_days=_retention_max_days(),
                 publishing=_publishing(),
             )
         if not args.drain:
@@ -151,7 +169,8 @@ def main(argv: list[str] | None = None) -> int:
                 from app.api.retention import prune_media
 
                 out = prune_media(
-                    session_factory, storage_from_env(), retention_days=_retention_days()
+                    session_factory, storage_from_env(), retention_days=_retention_days(),
+                    max_days=_retention_max_days(), dry_run=args.dry_run,
                 )
             print(json.dumps(out))
         finally:

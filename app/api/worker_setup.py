@@ -25,6 +25,7 @@ def configure_worker(
     storage: MediaStorage,
     *,
     retention_days: int,
+    retention_max_days: int = 0,
     reconcile_every_s: float = RECONCILE_EVERY_S,
     retention_every_s: float = RETENTION_EVERY_S,
     publishing: tuple[tuple[str, ...], Cipher] | None = None,
@@ -36,7 +37,8 @@ def configure_worker(
     rt.worker.every(reconcile_every_s, reconciler.run_once)
 
     def retention() -> dict:
-        return prune_media(session_factory, storage, retention_days=retention_days)
+        return prune_media(session_factory, storage, retention_days=retention_days,
+                           max_days=retention_max_days)
 
     rt.worker.every(retention_every_s, retention)
 

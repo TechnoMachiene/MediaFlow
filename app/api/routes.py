@@ -50,6 +50,7 @@ from app.api.dependencies import (
 )
 from app.api.drafts import add_comment
 from app.api.lifecycle import set_status
+from app.api.media_links import deleted_detail
 from app.api.media_storage import locate_job_media, store_media_asset
 from app.api.reconcile import dispatch_job
 from app.api.roles import (
@@ -483,6 +484,7 @@ def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) ->
         status=live_status,
         approval_status=row.approval_status,
         draft_version=row.draft_version,
+        media_deleted_reason=row.media_deleted_reason if row.media_deleted_at else None,
         submitter_email=submitter_email,
         original_filename=row.filename,
         attempts=data.get("attempts", 0),
@@ -852,6 +854,7 @@ def review_job(
             f"Job has already been {row.approval_status}",
         )
     row.approval_status = decision.status
+    row.reviewed_at = datetime.now(timezone.utc)
     owner = db.get(User, row.owner_id)
     audit.record(
         db, workspace_id=actor.workspace_id, actor=actor, action=f"job.{decision.status}",
@@ -879,10 +882,7 @@ def get_job_media(job_id: str, user: CurrentMember, db: DbSession, storage: Stor
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Uploaded media not found")
     where = locate_job_media(db, row, storage)
     if where.purged:
-        raise HTTPException(
-            status.HTTP_410_GONE,
-            "The original was deleted by the media retention policy; the drafts are kept",
-        )
+        raise HTTPException(status.HTTP_410_GONE, deleted_detail(row))
     if where.key is None or not storage.exists(where.key):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Uploaded media not found")
     local = storage.local_path(where.key)

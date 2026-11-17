@@ -107,8 +107,11 @@ def _instrument_redis() -> None:
 def instrument_app(app) -> None:
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-    # Health probes and scrapes would drown real traffic in the trace store.
-    FastAPIInstrumentor.instrument_app(app, excluded_urls="health/live,health/ready")
+    # Health probes and scrapes would drown real traffic in the trace store. Signed media links
+    # carry their token in the path, which must never reach the trace store either.
+    FastAPIInstrumentor.instrument_app(
+        app, excluded_urls="health/live,health/ready,api/v1/media/"
+    )
 
 
 def instrument_engine(engine) -> None:

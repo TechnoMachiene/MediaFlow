@@ -106,7 +106,7 @@ def test_reconcile_then_worker_then_prune(ops_env, capsys):
         db.execute(update(MediaAsset).values(last_used_at=LONG_AGO))
     capsys.readouterr()
     assert main(["prune-media"]) == 0
-    assert json.loads(capsys.readouterr().out.strip())["purged"] == 1
+    assert json.loads(capsys.readouterr().out.strip())["objects_purged"] == 1
     assert not (media_dir / "photo.png").exists()
     engine.dispose()
 

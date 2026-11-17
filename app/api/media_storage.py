@@ -86,6 +86,8 @@ class MediaLocation:
 
 
 def locate_job_media(db: Session, job: ApiJob, storage: MediaStorage) -> MediaLocation:
+    if job.media_deleted_at is not None:  # this job's original was deleted (policy or request)
+        return MediaLocation(None, True, None)
     if job.media_sha256 is not None:
         asset = db.get(MediaAsset, job.media_sha256)
         if asset is not None:

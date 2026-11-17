@@ -204,17 +204,10 @@ Failures that are not cross-store, such as Gemini errors, rate limits and dedup,
 
 ## Media retention
 
-Originals are deleted by `app/api/retention.py` when **all** of these hold:
-
-- These bytes have not been uploaded by anyone for `MEDIA_RETENTION_DAYS` (default 30; `0`
-  disables purging).
-- No job using them is still active.
-- No scheduled (not cancelled) post using them is still in the future.
-
-Drafts, approvals and calendar entries are kept. After a purge, the media URL answers
-**410 Gone**, and uploading the same bytes again restores the original. Upload and purge both
-lock the asset row, so an upload can never be paired with an original that is being deleted.
-The pruner runs hourly from every worker, or by hand with `python -m app.cli prune-media`.
-It also removes `.upload-*` partial files that are more than a day old.
+Originals are deleted per job, by each workspace's policy or on request, and the stored bytes
+go once no job anywhere still has them. An original is never deleted while its job is active,
+its calendar entry is ahead, or it is being published. A job whose original is gone fails
+cleanly if Redis ever needs it again (crash point 11). Policies, links and the race safety
+between uploads and deletion are described in [STORAGE.md](STORAGE.md).
 
 Tests: `tests/integration/test_retention_and_storage.py`.

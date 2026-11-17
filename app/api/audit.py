@@ -40,11 +40,14 @@ ACTIONS: dict[str, str] = {
     "publication.requested": "A scheduled post was set to publish to an account",
     "publication.retried": "A failed or uncertain publication was sent again",
     "publication.cancelled": "A pending publication was cancelled",
+    "media.deleted": "A job's original was deleted (by policy, after publishing, or on request)",
+    "job.purged": "A rejected job was deleted entirely by the retention policy",
+    "workspace.retention_changed": "The workspace's deletion policy changed",
     "workspace.created": "The workspace was created",
     "workspace.renamed": "The workspace was renamed",
 }
 CATEGORIES = ("member", "invitation", "job", "draft", "post", "connection", "publication",
-              "workspace")
+              "media", "workspace")
 
 # Out-of-band changes (the admin CLI) have no signed-in actor.
 SYSTEM_ACTOR = "system:cli"
@@ -61,15 +64,16 @@ def record(
     target_label: str | None = None,
     before: dict | None = None,
     after: dict | None = None,
+    system_actor: str = SYSTEM_ACTOR,
 ) -> AuditEvent:
     """Stage an audit event in `db`'s transaction. `actor` is a User or Member (anything with
-    `.id` and `.email`), or None for a system change."""
+    `.id` and `.email`), or None for a system change, recorded as `system_actor`."""
     if action not in ACTIONS:
         raise ValueError(f"unknown audit action {action!r}")
     event = AuditEvent(
         workspace_id=workspace_id,
         actor_id=getattr(actor, "id", None),
-        actor_email=getattr(actor, "email", None) or SYSTEM_ACTOR,
+        actor_email=getattr(actor, "email", None) or system_actor,
         action=action,
         target_type=target_type,
         target_id=str(target_id),
