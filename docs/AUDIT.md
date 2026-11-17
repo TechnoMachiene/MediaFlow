@@ -40,6 +40,11 @@ from. Admins read it per workspace (`GET /api/v1/audit-events`, or **Audit** in 
 | `post.scheduled` | An approved draft was put on the calendar | → time, timezone, job |
 | `post.rescheduled` | A calendar entry's time or timezone changed | time, timezone → time, timezone |
 | `post.cancelled` | A calendar entry was cancelled | time, timezone → cancelled |
+| `connection.connected` | A publishing account was connected (or reconnected) | → provider, channel, account |
+| `connection.disconnected` | A publishing account was disconnected; its credentials wiped | status → disconnected |
+| `publication.requested` | A scheduled post was set to publish to an account | → account, time |
+| `publication.retried` | A failed or uncertain publication was sent again | status, error → queued |
+| `publication.cancelled` | A pending publication was cancelled | status → cancelled |
 | `workspace.created` | The workspace was created | → name, first admin |
 | `workspace.renamed` | The workspace was renamed | name → name |
 <!-- actions:end -->
@@ -59,7 +64,7 @@ than audit events, so the trail stays a record of what actually changed.
 
 | Parameter | Meaning |
 |---|---|
-| `category` | `member`, `invitation`, `job`, `draft`, `post` or `workspace` |
+| `category` | `member`, `invitation`, `job`, `draft`, `post`, `connection`, `publication` or `workspace` |
 | `action` | One exact action from the table above (`422` if unknown) |
 | `actor_id` | Everything one person did |
 | `target_id` | One user's, job's or post's whole history |

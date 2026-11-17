@@ -102,6 +102,60 @@ export interface DraftComment {
   resolved_by_email: string | null;
 }
 
+export interface PublishingProvider {
+  name: string;
+  display_name: string;
+  sandbox: boolean;
+  idempotent: boolean;
+  channels: string[];
+  options: Record<string, string[]>;
+}
+
+export interface Connection {
+  id: string;
+  provider: string;
+  provider_name: string;
+  sandbox: boolean;
+  channel: string;
+  account_name: string;
+  status: 'active' | 'needs_reauth' | 'disconnected';
+  options: Record<string, string>;
+  last_error: string | null;
+  connected_by_email: string;
+  token_expires_at: string | null;
+  created_at: string;
+}
+
+export type PublicationStatus =
+  | 'queued' | 'publishing' | 'processing' | 'retrying' | 'published' | 'failed' | 'unknown'
+  | 'cancelled';
+
+export interface Publication {
+  id: string;
+  scheduled_post_id: string;
+  connection_id: string;
+  account_name: string;
+  provider: string;
+  channel: string;
+  sandbox: boolean;
+  status: PublicationStatus;
+  attempts: number;
+  next_attempt_at: string | null;
+  error_code: string | null;
+  last_error: string | null;
+  external_id: string | null;
+  external_url: string | null;
+  published_at: string | null;
+  requested_by_email: string;
+  created_at: string;
+}
+
+export interface SandboxFeed {
+  posts: { external_id: string; account_name: string; channel: string; body: string;
+    hashtags: string[]; state: string; created_at: string }[];
+  requests: { account_name: string; kind: string; outcome: string; created_at: string }[];
+}
+
 export interface Meta {
   demo_mode: boolean;
   allow_signup: boolean;

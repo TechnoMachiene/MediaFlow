@@ -62,6 +62,11 @@ RECONCILER_ACTIONS = Counter(
     "mediaflow_reconciler_actions_total",
     "Repairs made by the DB<->Redis reconciler (see docs/JOB_LIFECYCLE.md).", ["action"],
 )
+PUBLISH_OUTCOMES = Counter(
+    "mediaflow_publish_outcomes_total",
+    "Publishing delivery outcomes by provider (published, processing, retry, rejected, "
+    "authorization, unknown_outcome, ...).", ["provider", "outcome"],
+)
 RETENTION_PURGED = Counter(
     "mediaflow_retention_purged_total", "Original uploads deleted by the retention policy."
 )

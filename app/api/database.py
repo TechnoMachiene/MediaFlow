@@ -302,6 +302,135 @@ class ScheduledPost(Base):
     )
 
 
+class PublishingConnection(Base):
+    """A workspace's authorized account on one publishing provider, for one channel (which part
+    of a draft it posts: instagram, facebook, tiktok). Credentials are encrypted at rest
+    (app/publishing/crypto.py) and wiped on disconnect; the row stays for history."""
+
+    __tablename__ = "publishing_connections"
+    __table_args__ = (Index("ix_publishing_connections_workspace", "workspace_id", "status"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(24), nullable=False)
+    channel: Mapped[str] = mapped_column(String(24), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    account_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # active | needs_reauth | disconnected
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    credentials: Mapped[str | None] = mapped_column(Text, nullable=True)  # Fernet token
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    options: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    connected_by_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+
+
+class PublishingAuthState(Base):
+    """One pending OAuth authorization: single use, short-lived, bound to the admin and the
+    workspace that started it. Only the SHA-256 of `state` is stored; the PKCE verifier is
+    encrypted."""
+
+    __tablename__ = "publishing_auth_states"
+
+    state_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(24), nullable=False)
+    channel: Mapped[str] = mapped_column(String(24), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet token
+    options: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Publication(Base):
+    """Delivery of one scheduled post to one connection. The worker's delivery loop drives it
+    through the states in docs/PUBLISHING.md; `attempts` doubles as the claim token, so a
+    worker whose lease expired can't record a stale outcome."""
+
+    __tablename__ = "publications"
+    __table_args__ = (
+        UniqueConstraint("scheduled_post_id", "connection_id", name="uq_publications_post_conn"),
+        Index("ix_publications_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    scheduled_post_id: Mapped[str] = mapped_column(
+        ForeignKey("scheduled_posts.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[str] = mapped_column(
+        ForeignKey("publishing_connections.id", ondelete="CASCADE"), nullable=False
+    )
+    # queued | publishing | processing | retrying | published | failed | unknown | cancelled
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_by_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+
+
+class SandboxPost(Base):
+    """The sandbox *platform's* side: what the mock provider "published". Not app data; it is
+    what a real platform would hold, kept so the sandbox is observable end to end."""
+
+    __tablename__ = "sandbox_posts"
+
+    external_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    channel: Mapped[str] = mapped_column(String(24), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    hashtags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    media_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)  # processing | published
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
+class SandboxRequest(Base):
+    """Every call the sandbox platform received, like a real platform's developer console."""
+
+    __tablename__ = "sandbox_requests"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    account_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # publish | check | refresh
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
 ACTIVE_STATUSES = frozenset({"queued", "waiting", "processing", "retrying"})
 TERMINAL_STATUSES = frozenset({"done", "failed", "dead", "cancelled", "expired"})
 

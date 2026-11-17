@@ -10,6 +10,7 @@ import {
   Badge, Button, ConfirmButton, ErrorNote, Icon, PageHeader, Thumb, useLast,
 } from '../ui';
 import { ContentView, ScheduleForm } from './JobSheet';
+import { PostPublishing } from './Publishing';
 
 const TZ_KEY = 'mediaflow.tz';
 function savedTz(): string {
@@ -71,7 +72,7 @@ export function Calendar() {
 
   return (
     <div className="page">
-      <PageHeader title="Calendar" subtitle="Planned posts. Nothing here publishes on its own." />
+      <PageHeader title="Calendar" subtitle="Planned posts. Only entries you send to an account publish." />
       <div className="page-body">
         <div className="toolbar cal-toolbar">
           <div className="cal-nav">
@@ -263,6 +264,7 @@ function PostDetail({
         </>
       )}
 
+      <PostPublishing postId={post.id} active={!cancelled} />
       <ContentView text={post.content} />
     </div>
   );

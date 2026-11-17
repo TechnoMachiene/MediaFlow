@@ -27,6 +27,8 @@ from app.api.database import (
     AuditEvent,
     DraftComment,
     DraftVersion,
+    Publication,
+    PublishingConnection,
     ScheduledPost,
     User,
     Workspace,
@@ -41,7 +43,7 @@ pytestmark = pytest.mark.integration
 LATER = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
 SCHEDULE = {"scheduled_at": LATER, "timezone": "UTC"}
 A_TABLES = (ApiJob, ScheduledPost, WorkspaceMember, WorkspaceInvitation, AuditEvent,
-            DraftVersion, DraftComment)
+            DraftVersion, DraftComment, PublishingConnection, Publication)
 
 
 @dataclass
@@ -51,6 +53,7 @@ class World:
     runtime: object
     ids: dict[str, str] = field(default_factory=dict)
     headers: dict[str, dict] = field(default_factory=dict)
+    account_names: list[str] = field(default_factory=list)
 
     def as_(self, who: str, workspace: str | None = None) -> dict:
         headers = dict(self.headers[who])
@@ -62,7 +65,9 @@ class World:
         """Strings that only workspace A's data contains."""
         return {
             *(self.ids[k] for k in ("approved", "pending", "queued", "post", "invitation",
-                                    "comment", "anna", "alice", "carl")),
+                                    "comment", "anna", "alice", "carl", "conn", "conn_spare",
+                                    "pub_queued", "pub_failed")),
+            *self.account_names,
             "anna@a.example.com", "alice@a.example.com", "carl@a.example.com",
             "invitee@example.com", "secret-a.png", "secret-comment",
         }
@@ -110,8 +115,29 @@ def world(make_rt, tmp_path, monkeypatch):
         w.ids["comment"] = client.post(f"/api/v1/jobs/{w.ids['pending']}/comments",
                                        headers=anna, json={"body": "secret-comment"}).json()["id"]
         w.ids["workspace"] = "ws-a"
+        # Publishing: three sandbox accounts in A, two deliveries of A's scheduled post.
+        for key in ("conn", "conn_spare", "conn_failed"):
+            conn = sandbox_connection(client, anna)
+            w.ids[key] = conn["id"]
+            w.account_names.append(conn["account_name"])
+        for key, conn in (("pub_queued", "conn"), ("pub_failed", "conn_failed")):
+            w.ids[key] = client.post(
+                f"/api/v1/scheduled-posts/{w.ids['post']}/publications", headers=alice,
+                json={"connection_id": w.ids[conn]}).json()["id"]
+        with sessions.begin() as db:
+            db.get(Publication, w.ids["pub_failed"]).status = "failed"
         yield w
     engine.dispose()
+
+
+def sandbox_connection(client, admin) -> dict:
+    start = client.post("/api/v1/publishing/connections/authorize", headers=admin,
+                        json={"provider": "mock", "channel": "instagram"}).json()
+    challenge = start["authorize_url"].split("challenge=")[1]
+    code = client.post("/api/v1/publishing/sandbox/authorize", headers=admin, json={
+        "state": start["state"], "challenge": challenge, "allow": True}).json()["code"]
+    return client.post("/api/v1/publishing/oauth/callback", headers=admin,
+                       json={"state": start["state"], "code": code}).json()
 
 
 def snapshot(w: World) -> dict:
@@ -142,9 +168,12 @@ class Scoped:
     method: str
     path: str
     params: dict
-    body: dict | None
+    body: object  # a dict, None, or a function of the world (for bodies that carry A's ids)
     owner: str
     ok: int = 200
+
+    def json(self, w: World):
+        return self.body(w) if callable(self.body) else self.body
 
     def url(self, w: World) -> str:
         return "/api/v1" + self.path.format(**{p: w.ids[k] for p, k in self.params.items()})
@@ -180,6 +209,16 @@ SCOPED = [
            {"name": "Taken over"}, "anna"),
     Scoped("POST", "/workspaces/{workspace_id}/leave", {"workspace_id": "workspace"}, None,
            "carl", 204),
+    Scoped("DELETE", "/publishing/connections/{connection_id}", {"connection_id": "conn"},
+           None, "anna"),
+    Scoped("GET", "/scheduled-posts/{post_id}/publications", {"post_id": "post"}, None,
+           "alice"),
+    Scoped("POST", "/scheduled-posts/{post_id}/publications", {"post_id": "post"},
+           lambda w: {"connection_id": w.ids["conn_spare"]}, "alice", 201),
+    Scoped("POST", "/publications/{publication_id}/retry", {"publication_id": "pub_failed"},
+           None, "alice"),
+    Scoped("DELETE", "/publications/{publication_id}", {"publication_id": "pub_queued"}, None,
+           "alice"),
 ]
 
 # GET routes without ids that return tenant data, with the query they need.
@@ -189,6 +228,7 @@ LISTS = {
     "/users": "", "/jobs": "", "/jobs/mine": "", "/jobs/review": "", "/jobs/approved": "",
     "/jobs/rejected": "", "/stats": "", "/scheduled-posts": RANGE, "/calendar": RANGE,
     "/invitations": "", "/audit-events": "", "/auth/me": "", "/workspaces": "",
+    "/publishing/providers": "", "/publishing/connections": "", "/publishing/sandbox": "",
 }
 
 # Routes with no resource id: public, account-level, or creating inside the caller's own
@@ -205,6 +245,11 @@ UNSCOPED = {
     ("POST", "/invitations"),
     ("POST", "/invitations/lookup"),     # token-gated: tests/integration/test_invitations.py
     ("POST", "/invitations/accept"),     # token + email gated: test_invitations.py
+    ("POST", "/publishing/connections/authorize"),  # own workspace; spoof test below
+    # OAuth state-gated: the state is bound to the admin and workspace that started it
+    # (test_publishing.py::test_authorization_state_is_single_use_bound_and_expiring).
+    ("POST", "/publishing/oauth/callback"),
+    ("POST", "/publishing/sandbox/authorize"),
 }
 
 ATTACKERS = ("bea", "pat", "bob")  # B's admin, a platform admin, B's member
@@ -219,7 +264,7 @@ def test_every_route_is_classified(world):
         if path.startswith("/api/v1")
         for method in operations
     }
-    assert len(routes) >= 42  # sanity: the enumeration really found the API
+    assert len(routes) >= 53  # sanity: the enumeration really found the API
     classified = (
         {(s.method, s.path) for s in SCOPED} | {("GET", p) for p in LISTS} | UNSCOPED
     )
@@ -238,7 +283,8 @@ def test_no_one_outside_a_workspace_can_touch_its_resources(world, route):
     for attacker in ATTACKERS:
         for workspace in (None, "ws-a"):  # as themselves, then claiming to be in A
             response = w.client.request(
-                route.method, route.url(w), headers=w.as_(attacker, workspace), json=route.body
+                route.method, route.url(w), headers=w.as_(attacker, workspace),
+                json=route.json(w)
             )
             label = f"{attacker} {workspace or ''}"
             assert response.status_code in (403, 404), (label, response.status_code,
@@ -248,7 +294,7 @@ def test_no_one_outside_a_workspace_can_touch_its_resources(world, route):
 
     # Positive control: the same request from A's legitimate user succeeds.
     legit = w.client.request(
-        route.method, route.url(w), headers=w.as_(route.owner, "ws-a"), json=route.body
+        route.method, route.url(w), headers=w.as_(route.owner, "ws-a"), json=route.json(w)
     )
     assert legit.status_code == route.ok, legit.text
 
@@ -291,8 +337,10 @@ def test_creating_never_lands_in_a_workspace_you_are_not_in(world, attacker):
                       json={"email": "plant@b.example.com", "password": "a-long-password-1"}),
         w.client.post("/api/v1/invitations", headers=spoofed,
                       json={"email": "plant@b.example.com", "role": "admin"}),
+        w.client.post("/api/v1/publishing/connections/authorize", headers=spoofed,
+                      json={"provider": "mock", "channel": "instagram"}),
     ]
-    assert [r.status_code for r in attempts] == [403, 403, 403]
+    assert [r.status_code for r in attempts] == [403, 403, 403, 403]
     assert snapshot(w) == before
 
 

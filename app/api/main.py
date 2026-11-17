@@ -22,6 +22,7 @@ from app.api.database import (
     create_database,
 )
 from app.api.drafts import router as drafts_router
+from app.api.publishing import router as publishing_router
 from app.api.routes import router
 from app.api.worker_setup import configure_worker
 from app.api.workspaces import router as workspaces_router
@@ -30,6 +31,7 @@ from app.obs import metrics
 from app.obs.http import ObservabilityMiddleware
 from app.obs.logs import configure_logging
 from app.obs.tracing import configure_tracing, instrument_app, instrument_engine
+from app.publishing.registry import build_providers
 from app.wiring import Runtime, build_runtime
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -72,13 +74,16 @@ def create_app(
         app.state.engine = db_engine
         app.state.session_factory = db_sessions
         app.state.storage = storage or cfg.build_storage()
+        app.state.cipher = cfg.build_cipher()
+        app.state.providers = build_providers(cfg.publishing_providers, db_sessions)
         app.state.owns_runtime = runtime is None
         app.state.owns_engine = engine is None
 
         stop, worker_thread = threading.Event(), None
         if cfg.embedded_worker:
             configure_worker(
-                rt, db_sessions, app.state.storage, retention_days=cfg.media_retention_days
+                rt, db_sessions, app.state.storage, retention_days=cfg.media_retention_days,
+                publishing=(cfg.publishing_providers, app.state.cipher),
             )
             worker_thread = threading.Thread(
                 target=rt.worker.run, args=(stop,), name="embedded-worker", daemon=True
@@ -108,6 +113,7 @@ def create_app(
     application.include_router(workspaces_router)
     application.include_router(audit_router)
     application.include_router(drafts_router)
+    application.include_router(publishing_router)
     # Order matters: tracing is added last so it is outermost, and the access log written by
     # ObservabilityMiddleware happens inside the request span (and so carries its trace_id).
     application.add_middleware(ObservabilityMiddleware)

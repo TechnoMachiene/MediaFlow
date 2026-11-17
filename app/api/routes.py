@@ -23,7 +23,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -33,6 +33,7 @@ from app.api.database import (
     ApiJob,
     DraftComment,
     DraftVersion,
+    Publication,
     ScheduledPost,
     User,
     Workspace,
@@ -333,6 +334,8 @@ def delete_user(user_id: str, actor: CurrentMember, db: DbSession, runtime: Queu
 
     job_ids = [job.id for job in jobs]
     if job_ids:
+        post_ids = select(ScheduledPost.id).where(ScheduledPost.job_id.in_(job_ids))
+        db.execute(delete(Publication).where(Publication.scheduled_post_id.in_(post_ids)))
         for model in (ScheduledPost, DraftComment, DraftVersion):
             db.execute(delete(model).where(model.job_id.in_(job_ids)))
         db.execute(delete(ApiJob).where(ApiJob.id.in_(job_ids)))
@@ -1190,6 +1193,13 @@ def reschedule_post(
     post.scheduled_at = payload.scheduled_at.astimezone(timezone.utc)
     post.timezone = payload.timezone
     post.status = "scheduled"
+    # Deliveries waiting for the old time follow the post to the new one.
+    db.execute(
+        update(Publication)
+        .where(Publication.scheduled_post_id == post.id, Publication.status == "queued")
+        .values(next_attempt_at=post.scheduled_at)
+        .execution_options(synchronize_session=False)
+    )
     if _when(post) != before:
         audit.record(
             db, workspace_id=actor.workspace_id, actor=actor, action="post.rescheduled",
@@ -1210,6 +1220,14 @@ def cancel_scheduled_post(post_id: str, actor: CurrentMember, db: DbSession):
             before=_when(post), after={"status": "cancelled"},
         )
     post.status = "cancelled"
+    db.execute(
+        update(Publication)
+        .where(Publication.scheduled_post_id == post.id,
+               Publication.status.in_(("queued", "retrying")))
+        .values(status="cancelled", error_code="post_cancelled",
+                last_error="The calendar entry was cancelled", next_attempt_at=None)
+        .execution_options(synchronize_session=False)
+    )
     db.commit()
     return _scheduled_post_view(db, post, post.timezone)
 

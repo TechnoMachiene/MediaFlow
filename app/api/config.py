@@ -7,6 +7,16 @@ from pathlib import Path
 from app.config import env_flag
 from app.errors import ConfigError
 
+DEMO_JWT_SECRET = "demo-mode-only-secret-" + "x" * 32
+
+
+def publishing_env() -> tuple[tuple[str, ...], str]:
+    """(enabled providers, PUBLISHING_KEY). Shared by the API and the worker, which must agree.
+    PUBLISHING_PROVIDERS is a comma list; it defaults to the sandbox, and "none" disables."""
+    raw = os.environ.get("PUBLISHING_PROVIDERS", "mock").strip().lower()
+    names = () if raw in ("", "none") else tuple(n.strip() for n in raw.split(",") if n.strip())
+    return names, os.environ.get("PUBLISHING_KEY", "").strip()
+
 
 def _int(name: str, default: int, low: int, high: int) -> int:
     raw = os.environ.get(name, "").strip()
@@ -39,6 +49,10 @@ class ApiSettings:
     allow_signup: bool = False
     # How long an invitation link stays valid.
     invitation_ttl_hours: int = 168
+    # Publishing providers this installation enables (see docs/PUBLISHING.md), and the key that
+    # encrypts their credentials at rest (derived from jwt_secret when empty).
+    publishing_providers: tuple[str, ...] = ("mock",)
+    publishing_key: str = ""
     # Run a queue worker inside the API process (handy for development and demos).
     embedded_worker: bool = False
     demo_mode: bool = False
@@ -60,7 +74,7 @@ class ApiSettings:
 
         jwt_secret = os.environ.get("JWT_SECRET", "").strip()
         if not jwt_secret and demo:
-            jwt_secret = "demo-mode-only-secret-" + "x" * 32
+            jwt_secret = DEMO_JWT_SECRET
         if len(jwt_secret.encode()) < 32:
             raise ConfigError("JWT_SECRET must be at least 32 bytes; generate one with openssl.")
 
@@ -85,9 +99,16 @@ class ApiSettings:
             media_retention_days=_int("MEDIA_RETENTION_DAYS", 30, 0, 36500),
             allow_signup=env_flag("ALLOW_SIGNUP", default=demo),
             invitation_ttl_hours=_int("INVITATION_TTL_HOURS", 168, 1, 720),
+            publishing_providers=publishing_env()[0],
+            publishing_key=publishing_env()[1],
             embedded_worker=env_flag("EMBEDDED_WORKER", default=demo),
             demo_mode=demo,
         )
+
+    def build_cipher(self):
+        from app.publishing.crypto import Cipher
+
+        return Cipher(publishing_key=self.publishing_key, jwt_secret=self.jwt_secret)
 
     def build_storage(self):
         from app.storage import build_storage

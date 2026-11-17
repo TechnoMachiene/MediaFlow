@@ -115,7 +115,8 @@ export function ScheduleForm({
         </select>
       </Field>
       <p className="footnote">
-        This adds a planning entry to the calendar. Nothing is published automatically.
+        This adds an entry to the calendar. To publish it automatically, open the entry and
+        choose an account.
       </p>
       {error && <ErrorNote message={error} />}
       <div className="form-actions">

@@ -43,6 +43,24 @@ def _retention_days() -> int:
     return int(raw) if raw else 30
 
 
+def _publishing():
+    """The worker delivers publications only if it can decrypt the API's credentials, so it
+    derives the same key the API does (PUBLISHING_KEY, else JWT_SECRET)."""
+    from app.api.config import DEMO_JWT_SECRET, publishing_env
+    from app.config import env_flag
+    from app.publishing.crypto import Cipher
+
+    names, key = publishing_env()
+    jwt_secret = os.environ.get("JWT_SECRET", "").strip()
+    if not jwt_secret and env_flag("DEMO_MODE"):
+        jwt_secret = DEMO_JWT_SECRET
+    if not names or not (key or jwt_secret):
+        if names:
+            logging.warning("publishing disabled in this worker: set PUBLISHING_KEY or JWT_SECRET")
+        return None
+    return names, Cipher(publishing_key=key, jwt_secret=jwt_secret)
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     ap = argparse.ArgumentParser(prog="app.cli")
@@ -90,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
             db_engine, session_factory = create_database(database_url)
             instrument_engine(db_engine)
             configure_worker(
-                rt, session_factory, storage_from_env(), retention_days=_retention_days()
+                rt, session_factory, storage_from_env(), retention_days=_retention_days(),
+                publishing=_publishing(),
             )
         if not args.drain:
             metrics.serve(metrics.metrics_port())

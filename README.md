@@ -124,9 +124,11 @@ Without the overlay, logs, trace ids and metrics are still produced. Point
 `OTEL_EXPORTER_OTLP_ENDPOINT` and your own Prometheus at any backend. The runbook lists every
 signal, the SLOs, and how to trace a single user's job.
 
-> **Current scope:** This project analyzes media and creates content suggestions. It does not
-> connect to Instagram, Facebook, or TikTok, and it does not automatically publish posts. The
-> calendar is for planning and tracking only.
+> **Current scope:** This project analyzes media and creates content suggestions. Publishing
+> runs behind a provider interface, and the only provider is a **sandbox**: a pretend platform
+> inside MediaFlow that exercises consent, tokens, delivery, retries and failures. It does not
+> connect to Instagram, Facebook or TikTok yet; a real platform is added only after it passes
+> the readiness checklist in [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## What it does
 
@@ -156,6 +158,9 @@ signal, the SLOs, and how to trace a single user's job.
   review comments thread on a version and a field. A rejection's reason lands in the thread,
   and editing a decided draft sends it back for review.
 - Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
+- Publishes calendar entries at their time through a **provider interface** (OAuth with PKCE,
+  encrypted credentials, retries with backoff, async processing, crash-safe delivery). Only the
+  sandbox provider exists; each sandbox account can simulate a failure mode on purpose.
 - Stores schedule instants in UTC and displays them in the requested IANA timezone.
 - Ships a responsive web app (`frontend/`) covering upload, review, calendar, team, and queue
   activity.
@@ -165,8 +170,8 @@ signal, the SLOs, and how to trace a single user's job.
 
 ## What it does not do
 
-- It does not connect social accounts, send posts to platform APIs, or publish automatically when
-  a calendar date arrives.
+- It does not post to a real social platform yet. Calendar entries can publish automatically,
+  but only to sandbox accounts (see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
 - It does not provide in-app notifications for review results or scheduled dates.
 - It does not offer billing or per-workspace quotas yet, and it does not email invitations: the
   inviter shares the link. The Gemini rate limit is shared by the whole installation.
@@ -426,6 +431,14 @@ caller's role in that workspace, and records from other workspaces always answer
 | `POST /invitations/accept` | The invitee | New email: send a `password` to create the account. Existing account: call it signed in as that email. |
 | `POST /workspaces/{id}/leave` | Member of it | Leave a workspace (not your only one, not as its last admin). Your work stays with it. |
 | `PATCH /workspaces/{id}` | Admin of it | Rename the workspace. |
+| `GET /publishing/providers` | Authenticated | Enabled publishing providers (today: the sandbox). |
+| `GET /publishing/connections` | Authenticated | This workspace's connected accounts (never credentials). |
+| `POST /publishing/connections/authorize` | Admin | Start OAuth (code + PKCE); returns the consent URL. |
+| `POST /publishing/oauth/callback` | The admin who started it | Finish OAuth with `state` and `code`; stores the account, credentials encrypted. |
+| `DELETE /publishing/connections/{id}` | Admin | Disconnect: wipe credentials, cancel pending deliveries. |
+| `GET`, `POST /scheduled-posts/{post_id}/publications` | Post owner/admin | List, or add an account to publish an approved calendar entry to at its time. |
+| `POST /publications/{id}/retry`, `DELETE /publications/{id}` | Post owner/admin | Retry a failed or uncertain delivery; cancel a pending one. |
+| `GET /publishing/sandbox` | Authenticated | The sandbox platform's posts and request log for this workspace. |
 | `GET /audit-events` | Admin | This workspace's audit trail, newest first; filter by `category`, `action`, `actor_id` or `target_id`, page with `before`. |
 
 Managers can create and invite users and managers, but not admins. A workspace always keeps at
@@ -549,6 +562,8 @@ See [.env.example](./.env.example). Common settings:
 | `MEDIA_STORAGE`, `S3_BUCKET`, `S3_PREFIX`, `S3_ENDPOINT_URL`, `S3_REGION` | Where originals live: `local` or `s3`. |
 | `MEDIA_RETENTION_DAYS` | Days an unused original is kept; default 30, `0` keeps forever. |
 | `ALLOW_SIGNUP` | Self-serve sign-up that creates a workspace; default off. |
+| `PUBLISHING_PROVIDERS` | Enabled publishing providers, comma-separated; default `mock` (the sandbox), `none` disables. |
+| `PUBLISHING_KEY` | Fernet key encrypting publishing credentials; derived from `JWT_SECRET` if unset (set it in production). |
 | `INVITATION_TTL_HOURS` | How long an invitation link stays valid; default 168 (7 days), 1–720. |
 | `EMBEDDED_WORKER` | Run a queue worker inside the API process; default off. |
 | `DEMO_MODE` | Offline drafts, SQLite, embedded worker and demo accounts; never in production. |

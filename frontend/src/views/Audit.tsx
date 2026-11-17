@@ -5,13 +5,17 @@ import { useSession } from '../session';
 import type { AuditEvent, AuditPage, Role } from '../types';
 import { Button, Empty, ErrorNote, PageHeader, Segmented, Spinner } from '../ui';
 
-type Category = 'all' | 'member' | 'invitation' | 'job' | 'post' | 'workspace';
+type Category = 'all' | 'member' | 'invitation' | 'job' | 'draft' | 'post' | 'connection'
+  | 'publication' | 'workspace';
 const CATEGORIES: { value: Category; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'member', label: 'People' },
   { value: 'invitation', label: 'Invites' },
   { value: 'job', label: 'Reviews' },
+  { value: 'draft', label: 'Edits' },
   { value: 'post', label: 'Calendar' },
+  { value: 'publication', label: 'Publishing' },
+  { value: 'connection', label: 'Accounts' },
   { value: 'workspace', label: 'Workspace' },
 ];
 
@@ -45,6 +49,16 @@ export function describe(e: AuditEvent): string {
     case 'post.rescheduled':
       return `${who} moved ${what} from ${when(b.scheduled_at, b.timezone)} to ${when(a.scheduled_at, a.timezone)}`;
     case 'post.cancelled': return `${who} took ${what} off the calendar`;
+    case 'draft.edited':
+      return a.restored_from
+        ? `${who} restored version ${a.restored_from} of ${what} as version ${a.version}`
+        : `${who} saved version ${a.version} of ${what}${b.approval_status !== 'pending' ? ', sending it back for review' : ''}`;
+    case 'connection.connected':
+      return `${who} ${a.reconnected ? 'reconnected' : 'connected'} ${what} (${a.provider}, ${a.channel})`;
+    case 'connection.disconnected': return `${who} disconnected ${what}`;
+    case 'publication.requested': return `${who} set a post to publish to ${what}`;
+    case 'publication.retried': return `${who} sent a post to ${what} again`;
+    case 'publication.cancelled': return `${who} cancelled publishing a post to ${what}`;
     case 'workspace.created': return `${who} created the workspace ${a.name}`;
     case 'workspace.renamed': return `${who} renamed the workspace from ${b.name} to ${a.name}`;
     default: return `${who}: ${e.action} ${what}`;

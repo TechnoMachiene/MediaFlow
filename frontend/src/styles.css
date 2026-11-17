@@ -1693,3 +1693,18 @@ button.tile:active {
   border-left: 2px solid var(--line);
 }
 .note-anchor { font-size: 0.8125rem; color: var(--accent-text); }
+
+/* ── Publishing ──────────────────────────────────────────────────────────── */
+.publishing { display: grid; gap: 0.75rem; }
+.publishing .form-row { align-items: end; }
+.request-log {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.875rem;
+}
+.request-log code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+}

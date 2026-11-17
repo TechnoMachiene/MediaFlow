@@ -13,15 +13,17 @@ import { Audit } from './views/Audit';
 import { Calendar } from './views/Calendar';
 import { AcceptInvite, readInviteToken } from './views/Invite';
 import { Library } from './views/Library';
+import { Publishing, PublishingAuth, readPublishingAuth } from './views/Publishing';
 import { Login } from './views/Login';
 import { Review } from './views/Review';
 import { Team } from './views/Team';
 
-type Route = 'library' | 'review' | 'calendar' | 'team' | 'activity' | 'audit';
+type Route = 'library' | 'review' | 'calendar' | 'publishing' | 'team' | 'activity' | 'audit';
 const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boolean; view: () => React.JSX.Element }[] = [
   { id: 'library', label: 'Library', icon: 'library', allow: () => true, view: Library },
   { id: 'review', label: 'Review', icon: 'review', allow: (u) => isReviewer(u.role), view: Review },
   { id: 'calendar', label: 'Calendar', icon: 'calendar', allow: () => true, view: Calendar },
+  { id: 'publishing', label: 'Publishing', icon: 'upload', allow: (u) => isAdmin(u.role), view: Publishing },
   { id: 'team', label: 'Team', icon: 'team', allow: (u) => isReviewer(u.role), view: Team },
   { id: 'activity', label: 'Activity', icon: 'activity', allow: (u) => isAdmin(u.role), view: Activity },
   { id: 'audit', label: 'Audit', icon: 'lock', allow: (u) => isAdmin(u.role), view: Audit },
@@ -36,9 +38,10 @@ export default function App() {
   const [booting, setBooting] = useState(auth.token !== null);
   const [notice, setNotice] = useState('');
   const [invite, setInvite] = useState(readInviteToken);
+  const [oauth, setOauth] = useState(readPublishingAuth);
 
   useEffect(() => {
-    const onHash = () => setInvite(readInviteToken());
+    const onHash = () => { setInvite(readInviteToken()); setOauth(readPublishingAuth()); };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -99,6 +102,10 @@ export default function App() {
             onJoined={(u) => { setInvite(null); setNotice(''); setUser(u); }}
             onLeave={() => { window.history.replaceState(null, '', '#/'); setInvite(null); }}
           />
+        ) : session && oauth ? (
+          <SessionContext.Provider value={session}>
+            <PublishingAuth kind={oauth.kind} params={oauth.params} onDone={() => setOauth(null)} />
+          </SessionContext.Provider>
         ) : session ? (
           <SessionContext.Provider value={session}>
             {/* Remount every view when the workspace changes so no tenant's data lingers. */}

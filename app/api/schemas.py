@@ -150,6 +150,104 @@ class AuditPage(BaseModel):
     next_before: int | None
 
 
+class ProviderView(BaseModel):
+    name: str
+    display_name: str
+    sandbox: bool
+    idempotent: bool
+    channels: list[str]
+    options: dict[str, list[str]]
+
+
+class AuthorizeRequest(BaseModel):
+    provider: str = Field(max_length=24)
+    channel: str = Field(max_length=24)
+    options: dict[str, str] = Field(default_factory=dict, max_length=8)
+
+
+class AuthorizeResponse(BaseModel):
+    authorize_url: str
+    state: str
+
+
+class OAuthCallback(BaseModel):
+    state: str = Field(min_length=20, max_length=128)
+    code: str | None = Field(default=None, max_length=4096)
+    error: str | None = Field(default=None, max_length=200)
+
+
+class SandboxConsent(BaseModel):
+    state: str = Field(min_length=20, max_length=128)
+    challenge: str = Field(min_length=43, max_length=128)
+    allow: bool
+
+
+class SandboxCode(BaseModel):
+    code: str
+
+
+class ConnectionView(BaseModel):
+    id: str
+    provider: str
+    provider_name: str
+    sandbox: bool
+    channel: str
+    account_name: str
+    status: Literal["active", "needs_reauth", "disconnected"]
+    options: dict[str, str]
+    last_error: str | None
+    connected_by_email: str
+    token_expires_at: datetime | None
+    created_at: datetime
+
+
+class PublicationCreate(BaseModel):
+    connection_id: str = Field(max_length=36)
+
+
+class PublicationView(BaseModel):
+    id: str
+    scheduled_post_id: str
+    connection_id: str
+    account_name: str
+    provider: str
+    channel: str
+    sandbox: bool
+    status: Literal["queued", "publishing", "processing", "retrying", "published", "failed",
+                    "unknown", "cancelled"]
+    attempts: int
+    next_attempt_at: datetime | None
+    error_code: str | None
+    last_error: str | None
+    external_id: str | None
+    external_url: str | None
+    published_at: datetime | None
+    requested_by_email: str
+    created_at: datetime
+
+
+class SandboxPostView(BaseModel):
+    external_id: str
+    account_name: str
+    channel: str
+    body: str
+    hashtags: list[str]
+    state: str
+    created_at: datetime
+
+
+class SandboxRequestView(BaseModel):
+    account_name: str
+    kind: str
+    outcome: str
+    created_at: datetime
+
+
+class SandboxFeed(BaseModel):
+    posts: list[SandboxPostView]
+    requests: list[SandboxRequestView]
+
+
 class DemoAccount(BaseModel):
     email: str
     role: Role

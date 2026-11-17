@@ -35,10 +35,16 @@ ACTIONS: dict[str, str] = {
     "post.scheduled": "An approved draft was put on the calendar",
     "post.rescheduled": "A calendar entry's time or timezone changed",
     "post.cancelled": "A calendar entry was cancelled",
+    "connection.connected": "A publishing account was connected (or reconnected)",
+    "connection.disconnected": "A publishing account was disconnected; its credentials wiped",
+    "publication.requested": "A scheduled post was set to publish to an account",
+    "publication.retried": "A failed or uncertain publication was sent again",
+    "publication.cancelled": "A pending publication was cancelled",
     "workspace.created": "The workspace was created",
     "workspace.renamed": "The workspace was renamed",
 }
-CATEGORIES = ("member", "invitation", "job", "draft", "post", "workspace")
+CATEGORIES = ("member", "invitation", "job", "draft", "post", "connection", "publication",
+              "workspace")
 
 # Out-of-band changes (the admin CLI) have no signed-in actor.
 SYSTEM_ACTOR = "system:cli"
