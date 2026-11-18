@@ -36,8 +36,8 @@ The sign-in page also has one-click **Continue as …** buttons for each of thes
 **Walk through the whole workflow (about 2 minutes):**
 
 1. **Continue as Member** and upload any photo in **Library**. Within a few seconds it shows
-   **In review**, with Instagram, TikTok and Facebook drafts written from the photo's real
-   colours and shape.
+   **Draft ready**, with Facebook and Instagram drafts written from the photo's real colours
+   and shape. Open it, edit anything you like, and press **Send for review**.
 2. Sign out, **Continue as Manager**, open **Review**, and approve the draft.
 3. Sign out, **Continue as Member**, open the draft, and schedule it for a future date.
 4. Open **Calendar** to see it planned.
@@ -156,19 +156,37 @@ signal, the SLOs, and how to trace a single user's job.
 - Stores originals on local disk or any S3-compatible bucket (optionally encrypted), serves them
   through short-lived signed or presigned links, and applies per-workspace deletion policies
   (originals after 30 days by default, after publishing, rejected drafts; drafts kept).
-- Lets managers/admins review completed work and approve or reject it, with a **draft editor**:
-  the uploader and reviewers edit drafts field by field, every save is a version (with a
-  field-level diff and one-click restore), concurrent saves can't overwrite each other, and
-  review comments thread on a version and a field. A rejection's reason lands in the thread,
-  and editing a decided draft sends it back for review.
+- Lets the uploader check Gemini's draft first: they send it for review as written, or rewrite
+  it by hand and then send it. Until then it stays with them, editable and out of the review
+  queue.
+- Lets managers/admins review drafts they were sent and approve or reject them, with a
+  **draft editor**: the uploader and reviewers edit drafts field by field, every save is a
+  version (with a field-level diff and one-click restore), concurrent saves can't overwrite
+  each other, and review comments thread on a version and a field. A rejection's reason lands
+  in the thread. When the uploader edits a decided draft it comes back to them to send again;
+  when a reviewer edits it, it goes straight back to review.
 - Lets owners schedule completed, approved jobs and view, reschedule, or cancel them in a calendar.
 - Reports **insights** per workspace: content volume by day, media and channel, approval and
   first-pass approval rates, where the time goes (queue wait, analysis, review, publishing lag
   at p50/p90), comparison with the previous period, and rule-based findings on what to act on
   (see [docs/ANALYTICS.md](docs/ANALYTICS.md)).
-- Publishes calendar entries at their time through a **provider interface** (OAuth with PKCE,
-  encrypted credentials, retries with backoff, async processing, crash-safe delivery). Only the
-  sandbox provider exists; each sandbox account can simulate a failure mode on purpose.
+- Publishes calendar entries at their time through a **provider interface** (encrypted
+  credentials, retries with backoff, async processing, crash-safe delivery) to a real
+  **Facebook Page and Instagram business account** (Meta Graph API, credentials in `.env`), or
+  to the sandbox, whose accounts can simulate a failure mode on purpose
+  (see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
+- **Notifies people** in the app (the bell) and by email when SMTP is set up: drafts to review,
+  approvals and rejections with the reason, posts that went live or failed, and invitation
+  links. Each person can turn email copies off. A notification, or its email, opens the draft
+  it is about.
+- **Updates live:** every open screen refreshes by itself when someone else uploads, sends,
+  decides, edits, comments, schedules or publishes, or when Gemini finishes a draft. Saved
+  changes publish topic names on Redis pub/sub, and browsers listen on one Server-Sent Events
+  stream each (`app/api/live.py`). Behind the nginx overlay that stream is unbuffered.
+- Treats Gemini's drafts as suggestions: before approving, the reviewer sees what to verify
+  (unfilled `[NEEDS: …]` gaps, flagged phrases such as investment promises, Unicode bold text,
+  extra hashtags or phone numbers), can't approve while gaps remain, and confirms they checked
+  names, prices, dates and places, which the audit trail records.
 - Stores schedule instants in UTC and displays them in the requested IANA timezone.
 - Ships a responsive web app (`frontend/`) covering upload, review, calendar, team, and queue
   activity.
@@ -185,7 +203,8 @@ Precisely what the automated checks exercise, and what they don't:
 | Queue, worker, retries, crash recovery | Integration tests on real Redis, one per crash point ([docs/JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md)) | |
 | Gemini | The client's request handling, error mapping and video upload flow, against a stubbed SDK; every pipeline test uses a scripted stand-in | **Real Gemini responses.** One live smoke test (`make live`, one small image) runs only with your key; it is not run in CI. Draft quality is not tested |
 | Video | Validation, and the compression decision with ffmpeg stubbed | Real ffmpeg compression of real videos |
-| Publishing | The sandbox provider end to end: OAuth with PKCE, delivery, every failure type, crash safety ([docs/PUBLISHING.md](docs/PUBLISHING.md)) | **No real social platform**: none is implemented. One will be added only after it passes the readiness checklist |
+| Publishing | The sandbox provider end to end: OAuth with PKCE, delivery, every failure type, crash safety. Meta: contract tests against recorded Graph API replies (photos, videos, Reels, containers, every error class) and end to end through the delivery loop with Meta scripted ([docs/PUBLISHING.md](docs/PUBLISHING.md)) | **Meta's live API**: run one real post by hand before relying on it. TikTok, YouTube, LinkedIn and X are not implemented |
+| Notifications | Who is told what, read state, email outbox retries and permanent failures, opt-out, invitation links erased after sending | A real SMTP server |
 | Object storage | Local disk; S3 behaviour against `moto` (an emulator): presigned links, encryption, bucket checks | A real AWS, R2 or MinIO bucket |
 | Database | SQLite for most tests; PostgreSQL 17 in CI for the full migration chain and the audit trail's trigger | |
 | Tenancy and security | A route-by-route cross-tenant sweep, audit-trail and throttle tests | An external penetration test |
@@ -194,11 +213,13 @@ Precisely what the automated checks exercise, and what they don't:
 
 ## What it does not do
 
-- It does not post to a real social platform yet. Calendar entries can publish automatically,
-  but only to sandbox accounts (see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
-- It does not provide in-app notifications for review results or scheduled dates.
-- It does not offer billing or per-workspace quotas yet, and it does not email invitations: the
-  inviter shares the link. The Gemini rate limit is shared by the whole installation.
+- It posts to one Facebook Page and its Instagram account per installation, not to TikTok,
+  YouTube, LinkedIn or X, and not to Stories or carousels.
+- Email needs an SMTP account you provide; without one, notifications stay in the app.
+- It can't tell whether a fact in a draft is true. It points at what to check and makes the
+  reviewer confirm; a person still has to read every draft.
+- It does not offer billing or per-workspace quotas yet. The Gemini rate limit is shared by the
+  whole installation.
 - Demo drafts are deterministic templates, not real media understanding.
 
 ## Workflow
@@ -212,9 +233,27 @@ completed job -> manager review -> approved -> owner schedules -> calendar
                       +-- edit = new version, back to review
 ```
 
-The Gemini system prompt is designed to inspect the supplied media and generate platform-specific
-content drafts, including captions and related suggestions. Drafts are returned as analysis
-results; they are not sent to social platforms.
+### The system prompt
+
+Gemini writes with the system prompt in **`prompts/system_prompt.md`**: MGC Developments'
+copywriter for its Facebook Page and Instagram account, with brand rules, post types, a fact
+sheet (part G) and an output format (part I). Edit that file to change the copy rules or to
+update the fact sheet before a campaign, then restart the API and workers (with Compose,
+`docker compose restart api worker`; the folder is mounted, so no rebuild). Set
+`SYSTEM_PROMPT_FILE` to use a different file.
+
+- Each job keeps the prompt it was queued with, and the prompt is part of the cache key, so an
+  edited prompt never reuses drafts written under the old one.
+- The prompt replies in labelled sections (`FACEBOOK CAPTION:`, `INSTAGRAM HASHTAGS:`, `NOTES:`
+  ...). `app/copy_format.py` turns them into the per-platform draft the editor, review and
+  publishing use (Facebook caption; Instagram caption, hashtags, Reel text, cover title, slide
+  titles; post type, alt text, first comment and notes). The original reply is stored with it.
+- The prompt expects a post brief (part H), but uploads don't carry one yet, so Gemini is told
+  to work from the media and the fact sheet and to mark missing facts `[NEEDS: ...]` in the
+  draft's notes.
+- It writes for Facebook and Instagram only: drafts have no TikTok section.
+
+Drafts are suggestions for people to review; nothing is posted to a real platform.
 
 ## Technology
 
@@ -492,9 +531,13 @@ The full model, role matrix and invitation security properties are in
 | `GET /jobs/review` | Manager/admin | List completed jobs awaiting review. |
 | `GET /jobs/approved` | Manager/admin | List completed, approved jobs. |
 | `GET /jobs/rejected` | Manager/admin | List completed, rejected jobs. |
-| `PATCH /jobs/{job_id}/approval` | Manager/admin | Approve or reject a completed job; an optional `comment` (the reason) is added to the draft's thread. |
+| `POST /jobs/{job_id}/submit` | Owner/admin | Send a finished draft (`with_uploader`) to the review queue, as written or after editing it. `409` if there is no draft yet or it was already sent. |
+| `PATCH /jobs/{job_id}/approval` | Manager/admin | Approve or reject a draft that was sent for review (`409` while it is still `with_uploader`); an optional `comment` (the reason) is added to the draft's thread. Approving needs `"checked": true` (the reviewer verified the facts; else `422`) and no `[NEEDS: …]` gaps left (`409`). `GET /jobs/{id}` lists them in `checks`. |
+| `GET /notifications` | Authenticated | The caller's notifications in this workspace, newest first, and the unread count. |
+| `POST /notifications/read` | Authenticated | Mark `ids` (or `all`) read; only the caller's own. |
+| `GET`/`PUT /notifications/preferences` | Authenticated | Email copies on or off (`email`), and whether this server sends email at all. |
 | `GET /jobs/{job_id}/versions` | Owner/manager/admin | The draft's versions, newest first (1 is Gemini's). |
-| `POST /jobs/{job_id}/versions` | Owner/manager/admin | Save `text` (or `restore` an older version) as a new version. `base_version` must be the current one, or `409`. Sends a decided draft back for review; refused while it is on the calendar. |
+| `POST /jobs/{job_id}/versions` | Owner/manager/admin | Save `text` (or `restore` an older version) as a new version. `base_version` must be the current one, or `409`. An uploader's save keeps the draft (or takes it back) `with_uploader`; a reviewer's save sends a decided draft back to `pending`. Refused while it is on the calendar. |
 | `GET /jobs/{job_id}/comments` | Owner/manager/admin | Review comments, oldest first; replies carry `parent_id`. |
 | `POST /jobs/{job_id}/comments` | Owner/manager/admin | Comment on the current version, optionally on one `field` (e.g. `instagram.caption`), or reply with `parent_id`. |
 | `PATCH /jobs/{job_id}/comments/{comment_id}` | Owner/manager/admin | Resolve or reopen a thread (`{"resolved": true}`). |
@@ -554,7 +597,8 @@ Queue/analysis statuses commonly include:
 - `dead`: the job exhausted its retry limit.
 - `cancelled`: a queued job or calendar entry was cancelled.
 
-Approval is tracked separately: `pending`, `approved`, or `rejected`. Only jobs with analysis status
+Approval is tracked separately: `with_uploader` (drafted; the uploader hasn't sent it for review
+yet), `pending` (in the review queue), `approved`, or `rejected`. Only jobs with analysis status
 `done` and approval status `approved` can be scheduled.
 
 PostgreSQL and Redis are kept in agreement without a shared transaction. The job row is an
@@ -600,14 +644,21 @@ See [.env.example](./.env.example). Common settings:
 | `S3_PUBLIC_ENDPOINT_URL` | Host for presigned links when browsers reach the store at a different address than the servers. |
 | `S3_SSE`, `S3_SSE_KMS_KEY_ID` | Server-side encryption for new uploads: `AES256` or `aws:kms`. |
 | `ALLOW_SIGNUP` | Self-serve sign-up that creates a workspace; default off. |
-| `PUBLISHING_PROVIDERS` | Enabled publishing providers, comma-separated; default `mock` (the sandbox), `none` disables. |
+| `PUBLISHING_PROVIDERS` | Enabled publishing providers, comma-separated: `mock` (the sandbox, default) and/or `meta` (Facebook and Instagram); `none` disables. |
 | `PUBLISHING_KEY` | Fernet key encrypting publishing credentials; derived from `JWT_SECRET` if unset (set it in production). |
+| `PUBLIC_BASE_URL` | The app's public `https://` address: links in emails, and the media URLs Instagram fetches. |
+| `META_PAGE_ID`, `META_PAGE_ACCESS_TOKEN` | The Facebook Page and its system-user token; required with `meta` ([docs/PUBLISHING.md](docs/PUBLISHING.md#meta)). |
+| `META_INSTAGRAM_ACCOUNT_ID` | The Instagram business account linked to the Page (Instagram posting). |
+| `META_APP_SECRET`, `META_GRAPH_VERSION` | Optional: adds `appsecret_proof` to every call; Graph API version (default `v24.0`). |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Email copies of notifications, sent by the worker. Empty `SMTP_HOST`: in-app only. `SMTP_SECURITY` is `starttls` (587, default), `ssl` (465) or `none`. |
+| `FLAGGED_PHRASES_FILE` | Phrases a reviewer is warned about before approving (default `prompts/flagged_phrases.txt`). |
 | `LOGIN_MAX_FAILURES`, `LOGIN_IP_MAX_FAILURES`, `LOGIN_WINDOW_S`, `SIGNUP_IP_MAX` | Sign-in and signup throttling: defaults 10 per account and 50 per address in 15 minutes; 10 signups an hour per address. |
 | `FORWARDED_ALLOW_IPS` | Proxies whose `X-Forwarded-For` uvicorn trusts; `compose.proxy.yaml` sets it. |
 | `INVITATION_TTL_HOURS` | How long an invitation link stays valid; default 168 (7 days), 1–720. |
 | `EMBEDDED_WORKER` | Run a queue worker inside the API process; default off. |
 | `DEMO_MODE` | Offline drafts, SQLite, embedded worker and demo accounts; never in production. |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini credentials and model identifier (not needed in demo mode). |
+| `SYSTEM_PROMPT_FILE` | The Gemini system prompt; default `prompts/system_prompt.md`. Read at startup. |
 | `GEMINI_RPM`, `GEMINI_RPD`, `GEMINI_BURST` | Shared per-minute, daily, and burst call limits. |
 | `QUEUE_LEASE_S`, `QUEUE_MAX_ATTEMPTS` | Worker lease duration and retry limit. |
 | `MAX_IMAGE_MB`, `MAX_VIDEO_MB`, `MAX_VIDEO_UPLOAD_MB` | Media upload/processing limits. |
@@ -632,8 +683,8 @@ make e2e           # real browser (Chromium, desktop and phone) against the real
 `make e2e` runs Playwright (`frontend/e2e/`) against the actual app in demo mode
 (`scripts/e2e_server.py`: real API, queue, embedded worker and database, offline drafts) with a
 fresh database and Redis prefix per run, removed afterwards. It covers the main journey (upload,
-draft, approval, schedule, calendar) and the revision loop (reject with a reason, edit, back to
-review). It needs Redis and, once, `cd frontend && npx playwright install chromium`.
+draft, send for review, approval, schedule, calendar) and the revision loop (edit before sending,
+reject with a reason, edit, send back to review). It needs Redis and, once, `cd frontend && npx playwright install chromium`.
 
 Tests use a minimal-cost Argon2 hasher (production keeps the recommended parameters) and
 return from `drain()` as soon as the queue is empty, which keeps the whole suite near two
@@ -674,7 +725,13 @@ clean up tests.
 | `app/gemini_client.py` | Gemini client and provider error handling. |
 | `app/limiter.py` | Redis-backed shared rate limits, daily quota, cooldown, and backoff. |
 | `app/media.py` | Media validation, hashing, image preparation, and video compression. |
-| `app/system_prompt.py` | Instructions for media analysis and content-draft generation. |
+| `prompts/system_prompt.md` | The Gemini system prompt: copy rules, fact sheet, output format. |
+| `app/system_prompt.py` | Loads it (`SYSTEM_PROMPT_FILE` to override). |
+| `app/copy_format.py` | Turns the prompt's labelled reply into the structured draft. |
+| `prompts/flagged_phrases.txt`, `app/draft_checks.py` | What a reviewer must verify before approving. |
+| `app/publishing/meta.py`, `app/publishing/media.py` | Facebook Page and Instagram publishing (Graph API), and the media they post. |
+| `app/api/notifications.py` | In-app notifications, their email copies (outbox) and the API. |
+| `app/api/live.py`, `frontend/src/live.ts` | Live updates: changes announced on Redis, streamed to browsers. |
 | `migrations/` | Alembic schema history. |
 | `docs/JOB_LIFECYCLE.md` | Cross-store job lifecycle, failure matrix, guarantees. |
 | `docs/OPERATIONS.md` | Runbook: signals, SLOs, investigating a job, what to do for each alert. |

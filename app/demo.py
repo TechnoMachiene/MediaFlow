@@ -128,62 +128,32 @@ class DemoClient:
     def _pick(options: tuple[str, ...], variant: int, salt: int = 0) -> str:
         return options[(variant >> salt) % len(options)]
 
+    # The same shape the production prompt's reply is converted to (app/copy_format.py):
+    # Facebook and Instagram copy plus a summary. Generic on purpose: demo drafts never
+    # state facts about a real company or project.
     def _image_draft(self, f: dict, v: int) -> dict:
         hook = self._pick(
             ("Stop scrolling for a second.", "This one deserves a closer look.",
              "Saved the best shot for today."), v)
-        subject = f"a {f['shape']} image with a {f['colour']} palette"
-        tags = ["#demo", f"#{f['colour'].replace(' ', '')}vibes", f"#{f['shape']}",
-                "#contentcreator", "#mediaflow"]
-        langs = ["en"]
+        colour = f["colour"].capitalize()
         return {
-            "instagram": {
-                "recommended_format": "Single-image post" if f["shape"] != "portrait"
-                else "Portrait post or Story",
-                "caption": f"{hook} {f['colour'].capitalize()} tones, {f['tone']} mood. "
-                           "What would you title this? (Demo draft - connect Gemini for real "
-                           "analysis.)",
-                "hashtags": tags,
-                "cover_text": f"{f['colour'].capitalize()} mood",
-                "reel_hook": hook,
-                "accessibility_description": f"Demo description of {subject}, "
-                                             f"{f['width']}x{f['height']} pixels.",
-                "detected_languages": langs,
-                "primary_content_language": "English",
-                "translated_caption": "",
-            },
-            "tiktok": {
-                "video_concept": f"Slow push-in on this {f['shape']} shot with a "
-                                 f"{f['tone']} soundtrack.",
-                "hook": hook,
-                "caption": f"{f['colour'].capitalize()} energy only. #demo",
-                "hashtags": tags[:4],
-                "on_screen_text": [hook, f"{f['colour'].capitalize()} mood", "Follow for more"],
-                "voiceover_script": f"{hook} Notice the {f['colour']} tones - "
-                                    "that's the whole vibe.",
-                "detected_languages": langs,
-                "primary_content_language": "English",
-                "translated_caption": "",
-            },
             "facebook": {
-                "post_copy": f"{hook} We loved the {f['colour']} palette in this one - "
-                             f"{f['tone']} from edge to edge.",
-                "hashtags": tags[:3],
-                "call_to_action": "Tell us what you see first.",
-                "engagement_question": "Which colour should we feature next?",
-                "accessibility_description": f"Demo description of {subject}.",
-                "detected_languages": langs,
-                "primary_content_language": "English",
-                "translated_caption": "",
+                "caption": f"{hook} {colour} tones and a {f['tone']} mood in this "
+                           f"{f['shape']} shot.\n\nTell us what you see first. "
+                           "(Demo draft: connect Gemini for real copy.)",
+            },
+            "instagram": {
+                "caption": f"{hook} {colour} tones, {f['tone']} mood. What would you title "
+                           "this? (Demo draft: connect Gemini for real copy.)",
+                "hashtags": ["#Demo", f"#{f['colour'].title().replace(' ', '')}", "#MediaFlow"],
             },
             "content_summary": {
-                "media_type": "image",
-                "main_message": f"A {f['tone']} {f['colour']} visual for social channels",
-                "target_audience": "Followers who engage with visual, mood-led content",
-                "primary_goal": "Engagement",
-                "suggested_cta": "Comment with a title for this shot",
-                "content_tone": f["tone"],
-                "key_topics": [f["colour"], f["shape"], "visual mood"],
+                "post_type": "Demo post",
+                "alt_text": [f"A {f['shape']} image with a {f['colour']} palette, "
+                             f"{f['width']} by {f['height']} pixels."],
+                "first_comment": "Which colour should we feature next?",
+                "notes": ["Demo mode: written offline from the image's colours and shape, "
+                          "not by Gemini."],
             },
         }
 
@@ -192,51 +162,23 @@ class DemoClient:
         hook = self._pick(
             ("Wait for the last second.", "Here's what happened next.",
              "Watch this before you scroll."), v)
-        tags = ["#demo", "#video", "#behindthescenes", "#mediaflow"]
-        langs = ["en"]
         return {
-            "instagram": {
-                "recommended_format": "Reel",
-                "caption": f"{hook} A {length} worth the replay. (Demo draft - connect Gemini "
-                           "for real analysis.)",
-                "hashtags": tags,
-                "cover_text": hook,
-                "reel_hook": hook,
-                "accessibility_description": f"Demo description of a {length}.",
-                "detected_languages": langs,
-                "primary_content_language": "English",
-                "translated_caption": "",
-            },
-            "tiktok": {
-                "video_concept": f"Open on the strongest moment of this {length}, "
-                                 "then rewind to how it started.",
-                "hook": hook,
-                "caption": f"{hook} #demo",
-                "hashtags": tags[:3],
-                "on_screen_text": [hook, "Keep watching", "Part 2?"],
-                "voiceover_script": f"{hook} You won't believe how this {length} ends.",
-                "detected_languages": langs,
-                "primary_content_language": "English",
-                "translated_caption": "",
-            },
             "facebook": {
-                "post_copy": f"{hook} Sharing a {length} from this week.",
-                "hashtags": tags[:2],
-                "call_to_action": "Watch to the end and share your reaction.",
-                "engagement_question": "Would you want a part two?",
-                "accessibility_description": f"Demo description of a {length}.",
-                "detected_languages": langs,
-                "primary_content_language": "English",
-                "translated_caption": "",
+                "caption": f"{hook} Sharing a {length} from this week. "
+                           "(Demo draft: connect Gemini for real copy.)",
+            },
+            "instagram": {
+                "caption": f"{hook} A {length} worth the replay. "
+                           "(Demo draft: connect Gemini for real copy.)",
+                "hashtags": ["#Demo", "#Video", "#MediaFlow"],
+                "reel_on_screen_text": [hook, "Keep watching"],
+                "cover_title": "Worth the replay",
             },
             "content_summary": {
-                "media_type": "video",
-                "main_message": f"A {length} built for replays",
-                "target_audience": "Short-form video viewers",
-                "primary_goal": "Watch time",
-                "suggested_cta": "Share with a friend",
-                "content_tone": "energetic, curious",
-                "key_topics": ["video", "storytelling"],
+                "post_type": "Demo post",
+                "alt_text": [f"A {length}."],
+                "first_comment": "Would you want a part two?",
+                "notes": ["Demo mode: written offline from the file's size, not by Gemini."],
             },
         }
 

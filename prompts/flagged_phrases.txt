@@ -1,0 +1,30 @@
+# Words and phrases a reviewer must look at before approving (one per line, case-insensitive).
+# From the copywriter prompt: rule A3 (no investment promises), A4 (no unprovable
+# superlatives) and B (words to avoid). A match is a warning shown next to Approve, not a block:
+# some are fine in context (for example "sold out" when the brief confirms it in writing).
+# Edit freely; restart the API to apply.
+guaranteed
+assured
+risk-free
+risk free
+secure investment
+double your money
+fixed returns
+rental income
+roi
+prices will rise
+best investment
+safest investment
+sold out
+most trusted
+no. 1
+number one
+best developer
+tallest in pakistan
+landmark
+monumental
+unbelievable
+once-in-a-lifetime
+hurry
+last chance
+dream home guaranteed

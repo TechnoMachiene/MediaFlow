@@ -1,4 +1,5 @@
 import io
+import json
 import os
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ from app.config import Settings
 from app.errors import Permanent, RateLimited, Transient
 from app.gemini_client import GeminiClient, build_client
 from app.jobs import JobSpec
-from app.system_prompt import SYSTEM_PROMPT
+from app.system_prompt import NO_BRIEF
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.unit
@@ -70,10 +71,12 @@ def test_image_path(make_image):
     path = make_image(size=(3000, 2000))
     c = stub(ok_resp())
     out = client(c).analyse(spec(path))
-    assert out == {"text": "hello", "kind": "image", "model": "m1", "tokens": 42}
+    # Not in the labelled format, so stored as it came.
+    assert out == {"text": "hello", "source_text": "hello", "kind": "image", "model": "m1",
+                   "tokens": 42}
     model, contents, config = c.models.calls[0]
-    assert model == "m1" and len(contents) == 1
-    assert config.system_instruction == SYSTEM_PROMPT
+    assert model == "m1" and len(contents) == 2 and contents[1] == NO_BRIEF
+    assert config.system_instruction == "describe"  # the job's own prompt
     inline = contents[0].inline_data
     assert inline.mime_type == "image/jpeg"
     assert max(Image.open(io.BytesIO(inline.data)).size) == 1024
@@ -176,3 +179,14 @@ def test_build_client_always_returns_real_client(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "dummy")
     monkeypatch.setenv("GEMINI_MODEL", "m")
     assert isinstance(build_client(Settings.from_env()), GeminiClient)
+
+
+def test_a_labelled_reply_is_stored_as_the_structured_draft(make_image):
+    reply = ("POST TYPE: Construction update\nFACEBOOK CAPTION:\nMGC Jewel reached its 25th floor."
+             "\nINSTAGRAM CAPTION:\n25th of 27 floors.\nINSTAGRAM HASHTAGS (max 5):\n"
+             "#MGCDevelopments #MGCJewel\nNOTES: [NEEDS: phone number]")
+    out = client(stub(ok_resp(reply))).analyse(spec(make_image()))
+    draft = json.loads(out["text"])
+    assert draft["facebook"]["caption"] == "MGC Jewel reached its 25th floor."
+    assert draft["instagram"]["hashtags"] == ["#MGCDevelopments", "#MGCJewel"]
+    assert out["source_text"] == reply  # the original is kept

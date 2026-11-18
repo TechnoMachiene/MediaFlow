@@ -1,11 +1,12 @@
 import { MotionConfig } from 'motion/react';
+import { connectLive } from './live';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError, api, auth, clearMedia } from './api';
 import { isAdmin, isReviewer, roleLabel } from './lib';
 import { SessionContext, useSession } from './session';
 import { Sheet } from './Sheet';
-import { ToastProvider } from './toast';
-import type { Me, Meta, User } from './types';
+import { ToastProvider, useToast } from './toast';
+import type { Job, Me, Meta, User } from './types';
 import { Button, ConfirmButton, ErrorNote, Icon, Spinner, type IconName } from './ui';
 import { uploads } from './uploads';
 import { Activity } from './views/Activity';
@@ -13,9 +14,11 @@ import { Audit } from './views/Audit';
 import { Calendar } from './views/Calendar';
 import { AcceptInvite, readInviteToken } from './views/Invite';
 import { Insights } from './views/Insights';
+import { JobSheet } from './views/JobSheet';
 import { Library } from './views/Library';
 import { Publishing, PublishingAuth, readPublishingAuth } from './views/Publishing';
 import { Login } from './views/Login';
+import { Notifications } from './views/Notifications';
 import { Review } from './views/Review';
 import { Settings } from './views/Settings';
 import { Team } from './views/Team';
@@ -34,7 +37,9 @@ const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boole
   { id: 'settings', label: 'Settings', icon: 'gear', allow: (u) => isAdmin(u.role), view: Settings },
 ];
 
-const readRoute = () => window.location.hash.replace(/^#\/?/, '');
+const readRoute = () => window.location.hash.replace(/^#\/?/, '').split('?')[0];
+/** `#/review?job=<id>`: a link (from a notification or an email) to one draft. */
+const readLinkedJob = () => new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('job');
 const NO_META: Meta = { demo_mode: false, allow_signup: false, demo_password: null, demo_accounts: [] };
 
 export default function App() {
@@ -146,20 +151,45 @@ export function WorkspaceSwitcher({ user, onSwitch }: { user: Me; onSwitch: (id:
 function Shell({ user, signOut }: { user: Me; signOut: () => void }) {
   const [hash, setHash] = useState(readRoute);
   const [account, setAccount] = useState(false);
+  const [inbox, setInbox] = useState(false);
+  const [more, setMore] = useState(false);
+  const [linked, setLinked] = useState<Job | null>(null);
+  const toast = useToast();
+
+  // One live connection per tab; reconnects for the new workspace when you switch.
+  useEffect(() => connectLive(), [user.workspace.id]);
+
+  // Open the draft a link points at, then tidy the address back to the screen alone.
+  const openLinked = useCallback(() => {
+    const id = readLinkedJob();
+    if (!id) return;
+    window.history.replaceState(null, '', `#/${readRoute()}`);
+    api<Job>('GET', `/jobs/${encodeURIComponent(id)}`).then(
+      setLinked,
+      () => toast("That item isn't available any more.", 'error'),
+    );
+  }, [toast]);
+  useEffect(openLinked, [openLinked]);
 
   useEffect(() => {
-    const onHash = () => setHash(readRoute());
+    const onHash = () => { setHash(readRoute()); openLinked(); };
     const onAccount = () => setAccount(true);
+    const onInbox = () => setInbox(true);
     window.addEventListener('hashchange', onHash);
     window.addEventListener('mediaflow:account', onAccount);
+    window.addEventListener('mediaflow:notifications', onInbox);
     return () => {
       window.removeEventListener('hashchange', onHash);
       window.removeEventListener('mediaflow:account', onAccount);
+      window.removeEventListener('mediaflow:notifications', onInbox);
     };
-  }, []);
+  }, [openLinked]);
 
   const items = NAV.filter((n) => n.allow(user));
   const current = items.find((n) => n.id === hash) ?? items[0];
+  // A phone's tab bar fits five: with more screens, four tabs and "More" for the rest.
+  const tabs = items.length > 5 ? items.slice(0, 4) : items;
+  const overflow = items.length > 5 ? items.slice(4) : [];
   const View = current.view;
 
   useEffect(() => {
@@ -203,7 +233,46 @@ function Shell({ user, signOut }: { user: Me; signOut: () => void }) {
         <div key={current.id} className="view"><View /></div>
       </main>
 
-      <nav className="tabbar" aria-label="Main">{links('tab')}</nav>
+      <nav className="tabbar" aria-label="Main">
+        {tabs.map((n) => (
+          <a key={n.id} href={`#/${n.id}`} className="tab"
+            aria-current={n.id === current.id ? 'page' : undefined}>
+            <Icon name={n.icon} />
+            <span>{n.label}</span>
+          </a>
+        ))}
+        {overflow.length > 0 && (
+          <button type="button" className="tab" onClick={() => setMore(true)}
+            aria-current={overflow.some((n) => n.id === current.id) ? 'page' : undefined}>
+            <Icon name="more" />
+            <span>More</span>
+          </button>
+        )}
+      </nav>
+
+      <Sheet open={more} onClose={() => setMore(false)} title="More">
+        <nav className="more-links" aria-label="More">
+          {overflow.map((n) => (
+            <a key={n.id} href={`#/${n.id}`} className="nav-link" onClick={() => setMore(false)}
+              aria-current={n.id === current.id ? 'page' : undefined}>
+              <Icon name={n.icon} />
+              <span>{n.label}</span>
+            </a>
+          ))}
+        </nav>
+      </Sheet>
+
+      <JobSheet
+        job={linked}
+        // Members only ever get their own jobs; reviewers are told whose it is.
+        owned={!!linked && (!linked.submitter_email || linked.submitter_email === user.email)}
+        onClose={() => setLinked(null)}
+        onChanged={setLinked}
+      />
+
+      <Sheet open={inbox} onClose={() => setInbox(false)} title="Notifications">
+        {inbox && <Notifications onClose={() => setInbox(false)} />}
+      </Sheet>
 
       <Sheet open={account} onClose={() => setAccount(false)} title="Account">
         <div className="account">

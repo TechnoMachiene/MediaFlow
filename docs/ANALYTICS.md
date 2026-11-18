@@ -57,7 +57,7 @@ in seconds):
 |---|---|---|
 | Waiting for a worker | queue delay | `started_at - created_at` |
 | Analysis | Gemini processing | `completed_at - started_at` |
-| Waiting for review | review turnaround | decision - `completed_at` |
+| Waiting for review | review turnaround | decision - the latest `draft.submitted` before it (`completed_at` for drafts from before the send-for-review step) |
 | Going live | publishing lag | `published_at - scheduled_at` |
 
 `started_at` and `completed_at` are durable stage timestamps (migration 0018). They are stamped
@@ -88,7 +88,7 @@ something:
 | Approved as written | Under 50% of approvals were first-pass | Improve the prompt or brief; rejection comments say what |
 | Failures | 5%+ of at least 10 analyses failed | Check Activity for the errors |
 | Channel | A channel's success rate is under 90% over 3+ deliveries | Names the most common error (e.g. rate limiting, reconnect) |
-| Review backlog | Drafts are waiting for review, the oldest for over a day | Clear the queue |
+| Review backlog | Drafts are waiting for review, the oldest sent over a day ago (drafts the uploader hasn't sent yet are not counted) | Clear the queue |
 | Volume | Uploads changed 30%+ on a previous period of at least 10 | Capacity and quota planning |
 
 ## Access

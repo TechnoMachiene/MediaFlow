@@ -6,23 +6,29 @@ import { closeSheet, go, signInAs, signOut, unique, upload } from './helpers';
 test('a photo goes from upload to draft, approval, schedule and calendar', async ({ page }) => {
   const name = unique('journey');
 
-  // Member uploads; the worker drafts it.
+  // Member uploads; the worker drafts it; the member accepts the draft and sends it on.
   await signInAs(page, 'Member');
   await upload(page, name);
   const tile = page.getByTitle(name);
-  await expect(tile).toContainText('In review', { timeout: 45_000 });
+  await expect(tile).toContainText('Draft ready', { timeout: 45_000 });
   await tile.click();
   const sheet = page.getByRole('dialog', { name });
   await expect(sheet.getByRole('radio', { name: 'Instagram' })).toBeVisible();
-  await expect(sheet.getByText('Caption')).toBeVisible();
+  await expect(sheet.getByText('Caption').first()).toBeVisible();
+  await sheet.getByRole('button', { name: 'Send for review' }).click();
+  await expect(page.getByText('Sent for review')).toBeVisible();
   await closeSheet(page);
+  await expect(tile).toContainText('In review');
   await signOut(page);
 
   // Manager approves it from the review queue.
   await signInAs(page, 'Manager');
   await go(page, 'Review');
   await page.getByTitle(name).click();
-  await page.getByRole('dialog', { name }).getByRole('button', { name: 'Approve' }).click();
+  const review = page.getByRole('dialog', { name });
+  await expect(review.getByRole('button', { name: 'Approve' })).toBeDisabled();
+  await review.getByRole('checkbox', { name: /checked every name, price/ }).check();
+  await review.getByRole('button', { name: 'Approve' }).click();
   await expect(page.getByText('Approved', { exact: true }).first()).toBeVisible();
   await expect(page.getByTitle(name)).toBeHidden(); // left the waiting queue
   await signOut(page);

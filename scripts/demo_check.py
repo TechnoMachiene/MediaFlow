@@ -110,13 +110,16 @@ def main(base: str = "http://localhost:8081") -> int:
     draft = json.loads(job["result"]["text"])
     if job["result"]["model"] != "demo" or "instagram" not in draft:
         raise SystemExit(f"FAIL unexpected draft: {job['result']}")
-    step(f"uploaded and analysed: {draft['content_summary']['main_message']!r}")
+    step(f"uploaded and analysed: {draft['instagram']['caption'][:60]!r}...")
+
+    demo.call("POST", f"/api/v1/jobs/{job_id}/submit", token=member)
+    step("sent for review by the uploader")
 
     queue = demo.call("GET", "/api/v1/jobs/review?limit=100", token=manager)["items"]
     if job_id not in {item["job_id"] for item in queue}:
         raise SystemExit("FAIL job is missing from the manager's review queue")
     demo.call("PATCH", f"/api/v1/jobs/{job_id}/approval", token=manager,
-              body={"status": "approved"})
+              body={"status": "approved", "checked": True})
     step(f"approved by {MANAGER}")
 
     when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(microsecond=0)

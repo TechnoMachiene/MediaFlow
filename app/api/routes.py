@@ -27,7 +27,8 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api import audit
+from app import draft_checks
+from app.api import audit, notifications
 from app.api.database import (
     ACTIVE_STATUSES,
     ApiJob,
@@ -502,6 +503,8 @@ def _job_view(row: ApiJob, data: dict, *, submitter_email: str | None = None) ->
         media_kind=row.media_kind,
         media_url=f"/api/v1/jobs/{row.id}/media",
         created_at=row.created_at,
+        checks=draft_checks.check(result["text"]) if live_status == "done" and result
+        and row.approval_status in ("with_uploader", "pending") else [],
     )
 
 
@@ -855,20 +858,38 @@ def review_job(
             status.HTTP_409_CONFLICT,
             "A job can only be approved or rejected after Gemini processing is complete",
         )
+    if row.approval_status == "with_uploader":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The uploader hasn't sent this draft for review yet",
+        )
     if row.approval_status != "pending":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Job has already been {row.approval_status}",
         )
+    if decision.status == "approved":
+        gaps = draft_checks.blocking(draft_checks.check((row.result or {}).get("text", "")))
+        if gaps:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "Not yet: " + "; ".join(g["message"] for g in gaps))
+        if not decision.checked:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Confirm you checked every name, price, date and place against the brief and "
+                "fact sheet (checked: true)")
     row.approval_status = decision.status
     row.reviewed_at = datetime.now(timezone.utc)
     owner = db.get(User, row.owner_id)
+    after = {"approval_status": decision.status, "owner": owner.email if owner else None}
+    if decision.status == "approved":
+        after["facts_checked"] = True
     audit.record(
         db, workspace_id=actor.workspace_id, actor=actor, action=f"job.{decision.status}",
         target_type="job", target_id=row.id, target_label=row.filename,
-        before={"approval_status": "pending"},
-        after={"approval_status": decision.status, "owner": owner.email if owner else None},
+        before={"approval_status": "pending"}, after=after,
     )
+    notifications.draft_decided(db, row, actor, decision.status, decision.comment)
     if decision.comment and decision.comment.strip():
         # The reason lands in the draft's thread, where the uploader will look for it.
         add_comment(db, row, actor, decision.comment.strip(), kind=decision.status)
@@ -877,6 +898,30 @@ def review_job(
         runtime.store.status(job_id),
         submitter_email=owner.email if owner else None,
     )
+    db.commit()
+    return view
+
+
+@router.post("/jobs/{job_id}/submit", response_model=JobView)
+def submit_for_review(job_id: str, actor: CurrentMember, db: DbSession, runtime: QueueRuntime):
+    """The uploader accepts the draft as it stands (Gemini's, or their own edit) and sends it to
+    the review queue. Until then reviewers don't see it. The uploader or an Admin may send."""
+    row = _workspace_job(db, actor, job_id, any_owner=is_admin(actor))
+    if row.status != "done" or row.result is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This job has no draft yet")
+    if row.approval_status != "with_uploader":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This draft was already sent for review")
+    audit.record(
+        db, workspace_id=actor.workspace_id, actor=actor, action="draft.submitted",
+        target_type="job", target_id=row.id, target_label=row.filename,
+        before={"approval_status": "with_uploader"},
+        after={"approval_status": "pending", "version": row.draft_version},
+    )
+    row.approval_status = "pending"
+    notifications.draft_submitted(db, row, actor)
+    owner = db.get(User, row.owner_id)
+    view = _job_view(row, runtime.store.status(job_id),
+                     submitter_email=owner.email if owner else None)
     db.commit()
     return view
 
@@ -920,7 +965,11 @@ def list_jobs(
 
 @router.get("/jobs/{job_id}", response_model=JobView)
 def get_job(job_id: str, user: CurrentMember, db: DbSession, runtime: QueueRuntime):
-    row = _workspace_job(db, user, job_id, any_owner=is_admin(user))
+    """The uploader and Admins see any of their jobs; Managers see what their review lists
+    show (anything sent for review), so a notification can open the draft it is about."""
+    row = _workspace_job(db, user, job_id, any_owner=is_reviewer(user))
+    if row.owner_id != user.id and not is_admin(user) and row.approval_status == "with_uploader":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
     owner = db.get(User, row.owner_id) if is_reviewer(user) else None
     view = _job_view(
         row,

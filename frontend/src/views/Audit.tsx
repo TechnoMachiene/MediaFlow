@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import { fmt, roleLabel } from '../lib';
 import { useSession } from '../session';
@@ -53,7 +54,11 @@ export function describe(e: AuditEvent): string {
     case 'draft.edited':
       return a.restored_from
         ? `${who} restored version ${a.restored_from} of ${what} as version ${a.version}`
-        : `${who} saved version ${a.version} of ${what}${b.approval_status !== 'pending' ? ', sending it back for review' : ''}`;
+        : `${who} saved version ${a.version} of ${what}${
+          a.approval_status === 'pending' && b.approval_status !== 'pending' ? ', sending it back for review'
+            : a.approval_status === 'with_uploader' && b.approval_status !== 'with_uploader'
+              ? ', taking it back to the uploader' : ''}`;
+    case 'draft.submitted': return `${who} sent version ${a.version} of ${what} for review`;
     case 'connection.connected':
       return `${who} ${a.reconnected ? 'reconnected' : 'connected'} ${what} (${a.provider}, ${a.channel})`;
     case 'connection.disconnected': return `${who} disconnected ${what}`;
@@ -94,6 +99,7 @@ export function Audit() {
     }
   }, [category]);
 
+  useLive(['audit'], () => load(null));
   useEffect(() => {
     setItems(null);
     void load(null);

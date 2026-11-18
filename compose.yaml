@@ -40,6 +40,21 @@ x-app: &app
     INVITATION_TTL_HOURS: ${INVITATION_TTL_HOURS:-168}
     PUBLISHING_PROVIDERS: ${PUBLISHING_PROVIDERS:-mock}
     PUBLISHING_KEY: ${PUBLISHING_KEY:-}
+    PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    # Meta (Facebook Page + Instagram): docs/PUBLISHING.md, "Meta"
+    META_PAGE_ID: ${META_PAGE_ID:-}
+    META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN:-}
+    META_INSTAGRAM_ACCOUNT_ID: ${META_INSTAGRAM_ACCOUNT_ID:-}
+    META_APP_SECRET: ${META_APP_SECRET:-}
+    META_GRAPH_VERSION: ${META_GRAPH_VERSION:-}
+    # Email notifications: app/api/notifications.py
+    SMTP_HOST: ${SMTP_HOST:-}
+    SMTP_PORT: ${SMTP_PORT:-}
+    SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+    SMTP_USERNAME: ${SMTP_USERNAME:-}
+    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    SMTP_FROM: ${SMTP_FROM:-}
+    FLAGGED_PHRASES_FILE: ${FLAGGED_PHRASES_FILE:-}
     EMBEDDED_WORKER: "0"
     DEMO_MODE: "0"              # the demo has its own file: compose.demo.yaml
     LOG_FORMAT: ${LOG_FORMAT:-json}
@@ -50,6 +65,9 @@ x-app: &app
     OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
   volumes:
     - uploads:/app/uploads
+    # The Gemini system prompt and its fact sheet: edit prompts/system_prompt.md, then
+    # `docker compose restart api worker` (no rebuild needed).
+    - ./prompts:/app/prompts:ro
 
 services:
   postgres:

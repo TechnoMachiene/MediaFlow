@@ -33,23 +33,26 @@ def spec(path, kind="image", sha="ab" * 32):
     return JobSpec("j1", str(path), kind, "image/png", "prompt", "demo", sha)
 
 
-def test_demo_client_writes_the_same_json_shape_as_gemini(tmp_path, make_image, make_video):
+def test_demo_client_writes_the_same_shape_as_the_converted_gemini_reply(
+        tmp_path, make_image, make_video):
     client = DemoClient(delay_s=0)
     red = make_image(color=(220, 20, 30), size=(60, 120))
     out = client.analyse(spec(red))
     draft = json.loads(out["text"])
-    assert set(draft) == {"instagram", "tiktok", "facebook", "content_summary"}
-    assert "red" in draft["content_summary"]["main_message"]
-    assert draft["instagram"]["recommended_format"] == "Portrait post or Story"
+    assert set(draft) == {"facebook", "instagram", "content_summary"}  # Meta only, like the prompt
+    assert "red" in draft["instagram"]["caption"].lower()
+    assert "red" in draft["facebook"]["caption"].lower()
+    assert draft["instagram"]["hashtags"][0] == "#Demo"
+    assert "portrait" in draft["content_summary"]["alt_text"][0]
     assert out["model"] == "demo" and out["kind"] == "image"
     assert client.analyse(spec(red)) == out  # deterministic
 
     video = json.loads(client.analyse(spec(make_video(), kind="video"))["text"])
-    assert video["content_summary"]["media_type"] == "video"
+    assert video["instagram"]["cover_title"] and video["instagram"]["reel_on_screen_text"]
     for colour, word in (((10, 10, 10), "dark"), ((250, 250, 250), "white"),
                          ((128, 128, 128), "grey"), ((20, 60, 220), "blue")):
         text = client.analyse(spec(make_image(color=colour)))["text"]
-        assert word in json.loads(text)["content_summary"]["main_message"]
+        assert word in json.loads(text)["instagram"]["caption"].lower()
 
     with pytest.raises(Permanent):
         client.analyse(spec(tmp_path / "missing.png"))
@@ -204,6 +207,7 @@ def test_demo_app_end_to_end_with_embedded_worker(make_rt, tmp_path):
         assert "instagram" in json.loads(job["result"]["text"])
 
         # The rest of the workflow, each step by the role that does it for real.
+        assert client.post(f"/api/v1/jobs/{job_id}/submit", headers=headers).status_code == 200
         manager = next(a["email"] for a in meta["demo_accounts"] if a["role"] == "manager")
         manager_headers = {"Authorization": "Bearer " + client.post(
             "/api/v1/auth/login", json={"email": manager, "password": DEMO_PASSWORD}
@@ -212,7 +216,7 @@ def test_demo_app_end_to_end_with_embedded_worker(make_rt, tmp_path):
         assert job_id in {item["job_id"] for item in review}
         assert client.patch(
             f"/api/v1/jobs/{job_id}/approval", headers=manager_headers,
-            json={"status": "approved"},
+            json={"status": "approved", "checked": True},
         ).status_code == 200
 
         when = datetime.now(timezone.utc) + timedelta(days=2)

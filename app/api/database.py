@@ -17,6 +17,7 @@ from sqlalchemy import (
     create_engine,
     event,
     func,
+    true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -44,6 +45,10 @@ class User(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    # Email copies of in-app notifications (sent only when SMTP is configured).
+    email_notifications: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
     )
 
 
@@ -203,8 +208,10 @@ class ApiJob(Base):
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     media_kind: Mapped[str] = mapped_column(String(10), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    # with_uploader: the draft is ready but the uploader hasn't sent it for review (they accept
+    # Gemini's draft or rewrite it first) -> pending: in the review queue -> approved | rejected.
     approval_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending"
+        String(16), nullable=False, default="with_uploader", server_default="with_uploader"
     )
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -453,6 +460,46 @@ class SandboxRequest(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
+
+
+class Notification(Base):
+    """One message for one person: shown in the app, and emailed when SMTP is configured.
+
+    Written in the same transaction as the event it reports (an outbox), so a crash can't
+    lose one or send one for a change that rolled back. The worker sends the email copies
+    (app/api/notifications.py: EmailOutbox). An invitation has no user yet: it is email only,
+    and its link travels sealed in `secret`, which is cleared once sent."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_user", "user_id", "workspace_id", "created_at"),
+        Index("ix_notifications_email_due", "email_status", "email_next_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    route: Mapped[str | None] = mapped_column(String(40), nullable=True)  # e.g. "review"
+    secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # off (no SMTP, or the person opted out) | pending | sent | failed
+    email_status: Mapped[str] = mapped_column(String(12), nullable=False, default="off")
+    email_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    email_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 FINISHED_STATUSES = ("done", "failed", "dead")

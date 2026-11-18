@@ -3,10 +3,11 @@ import {
   useEffect, useId, useRef, useState,
   type ButtonHTMLAttributes, type ReactNode,
 } from 'react';
-import { mediaUrl } from './api';
+import { api, mediaUrl } from './api';
 import { jobState, roleLabel, spring, type Tone } from './lib';
 import { useSession } from './session';
-import type { Job, MediaKind } from './types';
+import { useToast } from './toast';
+import type { Job, MediaKind, NotificationList } from './types';
 
 /* ── Icons ───────────────────────────────────────────────────────────────── */
 
@@ -30,6 +31,8 @@ const PATHS = {
   chart: <><path d="M4 20V4M4 20h16" /><path d="m7.5 15 3.5-4 3 2.5 5-6" /></>,
   gear: <><circle cx="12" cy="12" r="3" /><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3" /></>,
   lock: <><rect x="5" y="10.5" width="14" height="10" rx="3" /><path d="M8.5 10.500V8a3.5 3.5 0 0 1 7 0v2.5" /></>,
+  more: <><circle cx="5.5" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="18.5" cy="12" r="1.4" /></>,
+  bell: <><path d="M6 16.500V11a6 6 0 0 1 12 0v5.5l1.5 2H4.500z" /><path d="M10 20.500a2.2 2.2 0 0 0 4 0" /></>,
 } as const;
 
 export type IconName = keyof typeof PATHS;
@@ -204,9 +207,64 @@ export function PageHeader({
       </div>
       <div className="page-actions">
         {children}
+        <BellButton />
         <AccountButton onClick={onAccount} />
       </div>
     </header>
+  );
+}
+
+/** Unread notifications; opens the notifications sheet (App.tsx). */
+// The newest notification this tab has already announced. Module level, so moving between
+// screens (each has its own header and bell) doesn't announce the same one again.
+// undefined until the first check after loading: what was already waiting isn't "new".
+let announced: string | null | undefined;
+
+const BELL_POLL_MS = 30_000;
+
+function BellButton() {
+  const toast = useToast();
+  const [unread, setUnread] = useState(0);
+  const [ringing, setRinging] = useState(0); // bumps to replay the ring animation
+  useEffect(() => {
+    let alive = true;
+    const load = () => api<NotificationList>('GET', '/notifications?limit=1')
+      .then((n) => {
+        if (!alive) return;
+        setUnread(n.unread);
+        const newest = n.items[0];
+        const fresh = newest && !newest.read && announced !== undefined && newest.id !== announced;
+        announced = newest?.id ?? null;
+        if (fresh) {
+          setRinging((r) => r + 1);
+          toast(newest.title, 'notice');
+        }
+      }, () => {});
+    load();
+    const timer = window.setInterval(load, BELL_POLL_MS);
+    window.addEventListener('mediaflow:notifications-changed', load);
+    const onLive = (e: Event) => {
+      if ((e as CustomEvent<string[]>).detail?.includes('notifications')) load();
+    };
+    window.addEventListener('mediaflow:live', onLive); // pushed at once (app/api/live.py)
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      window.removeEventListener('mediaflow:notifications-changed', load);
+      window.removeEventListener('mediaflow:live', onLive);
+    };
+  }, []);
+  const label = unread ? `Notifications, ${unread} unread` : 'Notifications';
+  return (
+    <button
+      type="button" aria-label={label} title={label}
+      className={`icon-btn bell-btn ${unread ? 'has-unread' : ''}`}
+      onClick={() => window.dispatchEvent(new Event('mediaflow:notifications'))}
+    >
+      {/* Keyed so each new notification restarts the ring. */}
+      <span key={ringing} className={ringing ? 'bell-ring' : undefined}><Icon name="bell" /></span>
+      {unread > 0 && <span className="bell-count" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>}
+    </button>
   );
 }
 

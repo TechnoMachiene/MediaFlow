@@ -36,7 +36,8 @@ from. Admins read it per workspace (`GET /api/v1/audit-events`, or **Audit** in 
 | `job.approved` | A reviewer approved a draft | pending → approved, owner |
 | `job.rejected` | A reviewer rejected a draft | pending → rejected, owner |
 | `job.cancelled` | A queued job was cancelled | status → cancelled |
-| `draft.edited` | A draft was edited or an older version restored (sends it back for review) | version, approval → version, approval, restored from |
+| `draft.submitted` | The uploader sent a draft for review (as written or after editing it) | with uploader → pending, version |
+| `draft.edited` | A draft was edited or an older version restored (back to the uploader if they made it, otherwise back to review) | version, approval → version, approval, restored from |
 | `post.scheduled` | An approved draft was put on the calendar | → time, timezone, job |
 | `post.rescheduled` | A calendar entry's time or timezone changed | time, timezone → time, timezone |
 | `post.cancelled` | A calendar entry was cancelled | time, timezone → cancelled |

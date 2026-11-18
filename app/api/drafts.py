@@ -161,24 +161,30 @@ def save_version(job_id: str, payload: DraftSave, actor: CurrentMember, db: DbSe
     )
     db.add(version)
     previous_approval = job.approval_status
-    returned = previous_approval != "pending"
+    # The uploader's own edit is theirs to send again; a reviewer's edit stays in review (or
+    # stays with the uploader if they haven't sent it yet). Either way a decision is undone.
+    if actor.id == job.owner_id or previous_approval == "with_uploader":
+        approval = "with_uploader"
+    else:
+        approval = "pending"
+    returned = approval == "pending" and previous_approval != "pending"
     audit.record(
         db, workspace_id=job.workspace_id, actor=actor, action="draft.edited",
         target_type="job", target_id=job.id, target_label=job.filename,
         before={"version": job.draft_version, "approval_status": previous_approval},
-        after={"version": number, "approval_status": "pending",
+        after={"version": number, "approval_status": approval,
                **({"restored_from": payload.restore} if payload.restore else {})},
     )
     job.result = {**job.result, "text": text}
     job.draft_version = number
-    job.approval_status = "pending"
+    job.approval_status = approval
     try:
         db.commit()
     except IntegrityError:  # a concurrent save took this number first (SQLite has no row lock)
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, CONFLICT.format(n=number)) from None
     return DraftSaved(
-        version=_version_view(version, number), approval_status="pending",
+        version=_version_view(version, number), approval_status=approval,
         returned_to_review=returned,
     )
 

@@ -2,6 +2,11 @@ import { useMemo, useState } from 'react';
 import { FIELD_LABELS, SECTION_LABELS, humanize, parseContent } from '../lib';
 import { CopyButton, Segmented } from '../ui';
 
+/** List fields read as lines (in order); the rest, like hashtags, as chips. */
+const LISTED = new Set([
+  'on_screen_text', 'reel_on_screen_text', 'carousel_slide_titles', 'alt_text', 'notes',
+]);
+
 /** Optional review hooks: open-comment counts per field, and a way to start one. */
 export interface FieldNotes {
   counts: Record<string, number>;
@@ -25,7 +30,7 @@ function ContentField({
   if (Array.isArray(value)) {
     const items = value.map(String).filter(Boolean);
     if (!items.length) return null;
-    const ordered = name === 'on_screen_text';
+    const ordered = LISTED.has(name);
     return (
       <section className="content-field">
         <header>

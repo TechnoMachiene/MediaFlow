@@ -100,10 +100,13 @@ class InvitationView(BaseModel):
 
 
 class InvitationCreated(InvitationView):
-    """Returned once, to the inviter. The token is never stored or shown again."""
+    """Returned once, to the inviter. The token is never shown again; only its hash is kept
+    (and, when email is on, a sealed copy in the email outbox until the email is sent)."""
 
     token: str
     accept_path: str
+    # The link was also emailed to the invitee (SMTP and PUBLIC_BASE_URL are configured).
+    emailed: bool = False
 
 
 class InvitationToken(BaseModel):
@@ -157,6 +160,7 @@ class ProviderView(BaseModel):
     idempotent: bool
     channels: list[str]
     options: dict[str, list[str]]
+    operator_only: bool = False
 
 
 class AuthorizeRequest(BaseModel):
@@ -418,6 +422,9 @@ class ApprovalDecision(BaseModel):
     status: Literal["approved", "rejected"]
     # Optional note for the uploader; it is added to the draft's comment thread.
     comment: str | None = Field(default=None, max_length=2000)
+    # Approving: the reviewer confirms they checked names, prices, dates and places against
+    # the brief and fact sheet (Gemini can get them wrong). Recorded in the audit trail.
+    checked: bool = False
 
 
 MAX_DRAFT_CHARS = 100_000
@@ -453,7 +460,7 @@ class DraftSave(BaseModel):
 
 class DraftSaved(BaseModel):
     version: DraftVersionView
-    approval_status: Literal["pending", "approved", "rejected"]
+    approval_status: Literal["with_uploader", "pending", "approved", "rejected"]
     returned_to_review: bool
 
 
@@ -503,10 +510,18 @@ class JobResponse(BaseModel):
     error: str | None = None
 
 
+class DraftCheck(BaseModel):
+    """Something to verify before approving (app/draft_checks.py). `block` stops approval."""
+
+    level: Literal["block", "warn"]
+    field: str | None = None
+    message: str
+
+
 class JobView(BaseModel):
     job_id: str
     status: str
-    approval_status: Literal["pending", "approved", "rejected"] = "pending"
+    approval_status: Literal["with_uploader", "pending", "approved", "rejected"] = "pending"
     # Which version of the draft `result` holds: 1 is Gemini's, higher means edited.
     draft_version: int = 1
     # Set once this job's original was deleted: policy | published | manual.
@@ -521,6 +536,7 @@ class JobView(BaseModel):
     media_kind: str
     media_url: str
     created_at: datetime
+    checks: list[DraftCheck] = Field(default_factory=list)
 
 
 class JobPage(BaseModel):

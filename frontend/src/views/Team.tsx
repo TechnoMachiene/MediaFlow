@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import { fmt, isAdmin, roleLabel } from '../lib';
 import { Sheet } from '../Sheet';
@@ -49,6 +50,7 @@ export function Team() {
     api<Invitation[]>('GET', '/invitations').then(setInvites, () => {});
   }, []);
   useEffect(loadInvites, [loadInvites]);
+  useLive(['team'], () => { void load(); loadInvites(); });
 
   return (
     <div className="page">
@@ -184,8 +186,10 @@ function InviteForm({ onClose, onSent }: { onClose: () => void; onSent: () => vo
     return (
       <div className="form">
         <p>
-          Send this link to <strong>{sent.email}</strong>. It works once, expires{' '}
-          {fmt.date(sent.expires_at)}, and is shown only now.
+          {sent.emailed
+            ? <>We emailed this link to <strong>{sent.email}</strong>. You can also send it yourself.</>
+            : <>Send this link to <strong>{sent.email}</strong>.</>}
+          {' '}It works once, expires {fmt.date(sent.expires_at)}, and is shown only now.
         </p>
         <Field label="Invitation link">
           <input readOnly value={link} onFocus={(e) => e.currentTarget.select()} />

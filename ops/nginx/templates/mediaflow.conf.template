@@ -67,6 +67,19 @@ server {
     location /api/v1/media/ {
         proxy_pass http://api:8000;
     }
+    # Media Instagram fetches for a post: signed, short-lived links, fetched by Meta's servers.
+    location /api/v1/publish-media/ {
+        proxy_pass http://api:8000;
+    }
+    # Live updates (Server-Sent Events): one long-lived response per open browser. Pass each
+    # message through at once, and allow it to stay open (the API ends it every 10 minutes and
+    # sends a heartbeat every 20 seconds). One connection per tab, so no request rate limit.
+    location = /api/v1/events {
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_pass http://api:8000;
+    }
     location /api/ {
         limit_req zone=api burst=40 nodelay;
         proxy_pass http://api:8000;

@@ -19,7 +19,9 @@ Stage timings (p50, p90, max, in seconds) follow one draft through the pipeline:
 
     queue wait   upload -> a worker starts it              (started_at - created_at)
     analysis     worker starts -> draft ready              (completed_at - started_at)
-    review wait  draft ready -> the review decision        (decision - completed_at)
+    review wait  sent for review -> the review decision    (decision - the latest
+                                                            draft.submitted before it;
+                                                            completed_at for older drafts)
     publish lag  calendar time -> live on the platform     (published_at - scheduled_at)
 
 Percentiles are computed in Python over the window's rows (nearest rank). The window is at
@@ -153,12 +155,16 @@ class _Period:
             .where(audit, AuditEvent.action.in_(("job.approved", "job.rejected")),
                    in_window(AuditEvent.created_at))).all()
         targets = {d.target_id for d in self.decisions}
-        # Earlier history of the decided drafts, for first-pass approval.
+        # Earlier history of the decided drafts, for first-pass approval and review waits.
         self.history = db.execute(
             select(AuditEvent.target_id, AuditEvent.action, AuditEvent.created_at)
             .where(audit, AuditEvent.target_id.in_(targets),
-                   AuditEvent.action.in_(("job.rejected", "draft.edited")))
+                   AuditEvent.action.in_(("job.rejected", "draft.edited", "draft.submitted")))
         ).all() if targets else []
+        self.sent: defaultdict[str, list[datetime]] = defaultdict(list)
+        for h in self.history:
+            if h.action == "draft.submitted":
+                self.sent[h.target_id].append(_utc(h.created_at))
         self.decided_jobs = {
             row.id: row for row in db.execute(
                 select(ApiJob.id, ApiJob.media_kind, ApiJob.completed_at)
@@ -198,9 +204,12 @@ class _Period:
         )
 
     def first_pass(self) -> int:
+        # Approved as Gemini wrote it: no earlier rejection or edit (the uploader's own rewrite
+        # before sending counts too; the metric measures the draft, not the reviewer).
         earlier = defaultdict(list)
         for h in self.history:
-            earlier[h.target_id].append(_utc(h.created_at))
+            if h.action != "draft.submitted":
+                earlier[h.target_id].append(_utc(h.created_at))
         return sum(
             1 for d in self.decisions if d.action == "job.approved"
             and not any(t < _utc(d.created_at) for t in earlier[d.target_id])
@@ -221,7 +230,10 @@ class _Period:
         for d in self.decisions:
             job = self.decided_jobs.get(d.target_id)
             if job and job.completed_at and (kind is None or job.media_kind == kind):
-                waits.append((_utc(d.created_at) - _utc(job.completed_at)).total_seconds())
+                decided = _utc(d.created_at)
+                since = max((t for t in self.sent[d.target_id] if t <= decided),
+                            default=_utc(job.completed_at))
+                waits.append((decided - since).total_seconds())
         return waits
 
     def timings(self) -> AnalyticsTimings:
@@ -371,10 +383,16 @@ def insights(now: _Period, before: _Period, t: AnalyticsTotals, r: AnalyticsRate
 
 
 def _backlog(db: Session, workspace_id: str, now: datetime) -> tuple[int, float]:
-    waiting = db.execute(select(ApiJob.completed_at).where(
-        ApiJob.workspace_id == workspace_id, ApiJob.status == "done",
-        ApiJob.approval_status == "pending")).scalars().all()
-    stamped = [_utc(w) for w in waiting if w]
+    """Drafts in the review queue, and how long the oldest has been there (since it was last
+    sent for review; since it was drafted, for drafts older than that step)."""
+    waiting = db.execute(
+        select(ApiJob.completed_at, func.max(AuditEvent.created_at))
+        .outerjoin(AuditEvent, (AuditEvent.target_id == ApiJob.id)
+                   & (AuditEvent.action == "draft.submitted"))
+        .where(ApiJob.workspace_id == workspace_id, ApiJob.status == "done",
+               ApiJob.approval_status == "pending")
+        .group_by(ApiJob.id, ApiJob.completed_at)).all()
+    stamped = [_utc(sent or done) for done, sent in waiting if sent or done]
     oldest = max(((now - w).total_seconds() for w in stamped), default=0.0)
     return len(waiting), oldest
 

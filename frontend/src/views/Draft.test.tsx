@@ -26,9 +26,13 @@ const comment = (over: Partial<DraftComment>): DraftComment => ({
   resolved_by_email: null, ...over,
 });
 
-function renderPanel(j: Job, canEdit = true) {
+function renderPanel(j: Job, canEdit = true, owned = false) {
   const onChanged = vi.fn();
-  render(<ToastProvider><DraftPanel job={j} canEdit={canEdit} onChanged={onChanged} /></ToastProvider>);
+  render(
+    <ToastProvider>
+      <DraftPanel job={j} owned={owned} canEdit={canEdit} onChanged={onChanged} />
+    </ToastProvider>,
+  );
   return onChanged;
 }
 
@@ -59,6 +63,31 @@ describe('DraftPanel', () => {
     expect(body.base_version).toBe(1);
     expect(body.note).toBe('More specific');
     expect(JSON.parse(body.text as string)).toEqual(JSON.parse(V2));
+  });
+
+  it("keeps the uploader's own edit with them until they send it", async () => {
+    fakeServer({
+      'GET /jobs/j1/comments': { body: [] },
+      'POST /jobs/j1/versions': {
+        status: 201,
+        body: { version: version(2, V2, { current: true }), approval_status: 'with_uploader',
+          returned_to_review: false },
+      },
+      'GET /jobs/j1': { body: job({ draft_version: 2, approval_status: 'with_uploader' }) },
+    });
+    renderPanel(job({ approval_status: 'with_uploader' }), true, true);
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByText(/Your changes stay with you/)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Caption'), '!');
+    await userEvent.click(screen.getByRole('button', { name: 'Save version' }));
+    expect(await screen.findByText(/Send it for review when it's ready/)).toBeInTheDocument();
+  });
+
+  it('warns the uploader that editing a decided draft brings it back to them', async () => {
+    fakeServer({ 'GET /jobs/j1/comments': { body: [] } });
+    renderPanel(job({ approval_status: 'rejected' }), true, true);
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByText(/brings it back to you to send for review again/)).toBeInTheDocument();
   });
 
   it('explains a conflicting save and offers to reload', async () => {

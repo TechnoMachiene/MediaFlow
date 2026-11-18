@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import { SECTION_LABELS, fmt, humanize, isAdmin, type Tone } from '../lib';
 import { useSession } from '../session';
@@ -56,6 +57,7 @@ export function Publishing() {
     }
   }, []);
   useEffect(() => { void load(); }, [load]);
+  useLive(['publishing', 'calendar'], load);
 
   return (
     <div className="page">
@@ -147,10 +149,16 @@ function ConnectForm({ provider }: { provider: PublishingProvider }) {
   return (
     <form className="form panel" onSubmit={start}>
       <h3>Connect a {provider.display_name.toLowerCase()} account</h3>
-      {provider.sandbox && (
+      {provider.sandbox ? (
         <p className="quiet">
           The sandbox is a pretend platform inside MediaFlow. It runs the real flow (consent,
           tokens, delivery, retries) and nothing leaves this installation.
+        </p>
+      ) : (
+        <p className="quiet">
+          <strong>This posts to the real, public account.</strong> It uses the Page and token set
+          in the server's .env file, which MediaFlow checks with Meta when you connect. Each
+          workspace that should post to it connects it once.
         </p>
       )}
       <div className="form-row">
@@ -319,6 +327,7 @@ export function PostPublishing({ postId, active }: { postId: string; active: boo
     }
   }, [postId]);
   useEffect(() => { void load(); }, [load]);
+  useLive(['publishing', 'calendar'], load);
 
   // Keep following deliveries that are on their way.
   useEffect(() => {

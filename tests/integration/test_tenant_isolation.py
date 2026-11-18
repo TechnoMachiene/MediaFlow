@@ -36,7 +36,7 @@ from app.api.database import (
     WorkspaceInvitation,
     WorkspaceMember,
 )
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -65,7 +65,7 @@ class World:
     def markers(self) -> set[str]:
         """Strings that only workspace A's data contains."""
         return {
-            *(self.ids[k] for k in ("approved", "pending", "queued", "post", "invitation",
+            *(self.ids[k] for k in ("approved", "pending", "unsent", "queued", "post", "invitation",
                                     "comment", "anna", "alice", "carl", "conn", "conn_spare",
                                     "pub_queued", "pub_failed")),
             *self.account_names,
@@ -99,16 +99,21 @@ def world(make_rt, tmp_path, monkeypatch):
             "job_id"]
         w.ids["pending"] = upload(client, alice, png((2, 0, 0)), name="secret-a.png").json()[
             "job_id"]
+        w.ids["unsent"] = upload(client, alice, png((5, 0, 0)), name="secret-a.png").json()[
+            "job_id"]  # drafted but not yet sent for review by its uploader
         runtime.worker.drain()
+        for key in ("approved", "pending"):
+            send_for_review(client, alice, w.ids[key])
         client.patch(f"/api/v1/jobs/{w.ids['approved']}/approval", headers=anna,
-                     json={"status": "approved"})
+                     json={"status": "approved", "checked": True})
         w.ids["post"] = client.post(f"/api/v1/jobs/{w.ids['approved']}/schedule",
                                     headers=alice, json=SCHEDULE).json()["id"]
         w.ids["schedulable"] = upload(client, alice, png((3, 0, 0)),
                                       name="secret-a.png").json()["job_id"]
         runtime.worker.drain()
+        send_for_review(client, alice, w.ids["schedulable"])
         client.patch(f"/api/v1/jobs/{w.ids['schedulable']}/approval", headers=anna,
-                     json={"status": "approved"})
+                     json={"status": "approved", "checked": True})
         w.ids["queued"] = upload(client, alice, png((4, 0, 0)), name="secret-a.png").json()[
             "job_id"]  # never drained: still cancellable
         w.ids["invitation"] = client.post("/api/v1/invitations", headers=anna,
@@ -162,7 +167,7 @@ def snapshot(w: World) -> dict:
                 User.id.in_([w.ids["anna"], w.ids["alice"], w.ids["carl"]])))
         )
     out["redis"] = {k: w.runtime.store.status(w.ids[k])["status"]
-                    for k in ("approved", "pending", "schedulable", "queued")}
+                    for k in ("approved", "pending", "unsent", "schedulable", "queued")}
     return out
 
 
@@ -195,7 +200,8 @@ SCOPED = [
     Scoped("GET", "/jobs/{job_id}", {"job_id": "approved"}, None, "alice"),
     Scoped("GET", "/jobs/{job_id}/media", {"job_id": "approved"}, None, "alice"),
     Scoped("PATCH", "/jobs/{job_id}/approval", {"job_id": "pending"},
-           {"status": "approved"}, "anna"),
+           {"status": "approved", "checked": True}, "anna"),
+    Scoped("POST", "/jobs/{job_id}/submit", {"job_id": "unsent"}, None, "alice"),
     Scoped("DELETE", "/jobs/{job_id}", {"job_id": "queued"}, None, "alice"),
     Scoped("POST", "/jobs/{job_id}/schedule", {"job_id": "schedulable"}, SCHEDULE, "alice", 201),
     Scoped("GET", "/jobs/{job_id}/versions", {"job_id": "pending"}, None, "alice"),
@@ -245,6 +251,8 @@ LISTS = {
     "/publishing/providers": "", "/publishing/connections": "", "/publishing/sandbox": "",
     # Aggregates; the installation view is for platform admins and has no content or ids.
     "/analytics": "", "/analytics/workspaces": "",
+    # The caller's own notifications in the current workspace, and their email preference.
+    "/notifications": "", "/notifications/preferences": "",
 }
 
 # Routes with no resource id: public, account-level, or creating inside the caller's own
@@ -252,6 +260,9 @@ LISTS = {
 UNSCOPED = {
     ("GET", "/meta"),                    # public, no tenant data
     ("POST", "/auth/login"),             # public
+    # The caller's own rows only (user and workspace): tests/integration/test_notifications.py
+    ("POST", "/notifications/read"),
+    ("PUT", "/notifications/preferences"),
     ("POST", "/auth/signup"),            # creates a brand-new workspace
     ("POST", "/workspaces"),             # creates a brand-new workspace
     # These three create inside the caller's workspace; a spoofed header is refused in

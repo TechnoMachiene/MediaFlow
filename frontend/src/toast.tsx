@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useRef, useState, type ReactNod
 import { spring } from './lib';
 import { Icon } from './ui';
 
-type Kind = 'success' | 'error';
+type Kind = 'success' | 'error' | 'notice';
 interface Toast {
   id: number;
   kind: Kind;
@@ -22,7 +22,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((list) => [...list.slice(-2), { id, kind, text }]);
     window.setTimeout(
       () => setToasts((list) => list.filter((t) => t.id !== id)),
-      kind === 'error' ? 6000 : 3500,
+      kind === 'success' ? 3500 : 6000,
     );
   }, []);
 
@@ -42,7 +42,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               exit={{ opacity: 0, y: 20, scale: 0.94, filter: 'blur(8px)' }}
               transition={spring(0.35, 1)}
             >
-              <Icon name={t.kind === 'error' ? 'alert' : 'check'} />
+              <Icon name={t.kind === 'error' ? 'alert' : t.kind === 'notice' ? 'bell' : 'check'} />
               <span>{t.text}</span>
             </motion.div>
           ))}

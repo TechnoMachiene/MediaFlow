@@ -1,5 +1,6 @@
 export type Role = 'user' | 'manager' | 'admin' | 'super_admin';
-export type Approval = 'pending' | 'approved' | 'rejected';
+/** with_uploader: drafted, but its uploader hasn't accepted it or sent it for review yet. */
+export type Approval = 'with_uploader' | 'pending' | 'approved' | 'rejected';
 export type MediaKind = 'image' | 'video';
 
 export interface User {
@@ -38,6 +39,8 @@ export interface Invitation {
 export interface CreatedInvitation extends Invitation {
   token: string;
   accept_path: string;
+  /** Also emailed to the invitee (the server has email set up). */
+  emailed?: boolean;
 }
 
 export interface InvitationPreview {
@@ -109,6 +112,8 @@ export interface PublishingProvider {
   idempotent: boolean;
   channels: string[];
   options: Record<string, string[]>;
+  /** The account belongs to the installation (credentials in .env); operators only. */
+  operator_only?: boolean;
 }
 
 export interface Connection {
@@ -242,6 +247,30 @@ export interface Job {
   result: AnalysisResult | null;
   media_kind: MediaKind;
   created_at: string;
+  /** What to verify before approving; `block` ones must be fixed first. */
+  checks?: DraftCheck[];
+}
+
+export interface DraftCheck {
+  level: 'block' | 'warn';
+  field: string | null;
+  message: string;
+}
+
+export interface AppNotification {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  job_id: string | null;
+  route: string | null;
+  created_at: string;
+  read: boolean;
+}
+
+export interface NotificationList {
+  items: AppNotification[];
+  unread: number;
 }
 
 export interface Page<T> {

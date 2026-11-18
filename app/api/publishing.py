@@ -30,7 +30,7 @@ from app.api.database import (
     ScheduledPost,
 )
 from app.api.dependencies import CurrentMember, DbSession, Member
-from app.api.roles import is_admin
+from app.api.roles import is_admin, is_platform_admin
 from app.api.routes import _workspace_post
 from app.api.schemas import (
     AuthorizeRequest,
@@ -125,8 +125,10 @@ def list_providers(request: Request, actor: CurrentMember):
     return [
         ProviderView(name=p.info.name, display_name=p.info.display_name, sandbox=p.info.sandbox,
                      idempotent=p.info.idempotent, channels=list(p.info.channels),
-                     options={k: list(v) for k, v in p.info.options.items()})
+                     options={k: list(v) for k, v in p.info.options.items()},
+                     operator_only=p.info.operator_only)
         for p in _providers(request).values()
+        if not p.info.operator_only or is_platform_admin(actor.user)
     ]
 
 
@@ -145,6 +147,10 @@ def start_authorization(payload: AuthorizeRequest, request: Request, actor: Curr
     """Step 1 of OAuth (authorization code + PKCE). Send the admin to `authorize_url`."""
     _require_admin(actor)
     provider = _provider(request, payload.provider)
+    if provider.info.operator_only and not is_platform_admin(actor.user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Only the installation's operator can connect {provider.info.display_name}")
     if payload.channel not in provider.info.channels:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown channel")
     for key, value in payload.options.items():
@@ -204,7 +210,7 @@ def finish_authorization(payload: OAuthCallback, request: Request, actor: Curren
     try:
         grant = provider.exchange_code(
             code=payload.code, code_verifier=cipher.open(row.code_verifier),
-            redirect_uri=_redirect_uri(request), options=row.options,
+            redirect_uri=_redirect_uri(request), options=row.options, channel=row.channel,
         )
     except AuthorizationDenied as err:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(err)) from None

@@ -31,7 +31,11 @@ ACTIONS: dict[str, str] = {
     "job.approved": "A reviewer approved a draft",
     "job.rejected": "A reviewer rejected a draft",
     "job.cancelled": "A queued job was cancelled",
-    "draft.edited": "A draft was edited or an older version restored (sends it back for review)",
+    "draft.submitted": "The uploader sent a draft for review (as written or after editing it)",
+    "draft.edited": (
+        "A draft was edited or an older version restored "
+        "(back to the uploader if they made it, otherwise back to review)"
+    ),
     "post.scheduled": "An approved draft was put on the calendar",
     "post.rescheduled": "A calendar entry's time or timezone changed",
     "post.cancelled": "A calendar entry was cancelled",

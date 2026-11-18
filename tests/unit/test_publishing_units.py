@@ -38,7 +38,15 @@ def test_credentials_round_trip_and_a_wrong_key_means_reconnect():
         Cipher(jwt_secret="t" * 40).open_credentials(sealed)
 
 
-def test_only_implemented_providers_can_be_enabled():
+def test_only_implemented_providers_can_be_enabled(monkeypatch):
     assert list(build_providers(["mock"], session_factory=None)) == ["mock"]
-    with pytest.raises(ConfigError, match="readiness checklist"):
+    with pytest.raises(ConfigError, match="not implemented"):
         build_providers(["mock", "instagram"], session_factory=None)
+    # Meta needs its credentials before it can be switched on.
+    monkeypatch.delenv("META_PAGE_ID", raising=False)
+    monkeypatch.delenv("META_PAGE_ACCESS_TOKEN", raising=False)
+    with pytest.raises(ConfigError, match="META_PAGE_ID"):
+        build_providers(["meta"], session_factory=None)
+    monkeypatch.setenv("META_PAGE_ID", "1234")
+    monkeypatch.setenv("META_PAGE_ACCESS_TOKEN", "token")
+    assert list(build_providers(["mock", "meta"], session_factory=None)) == ["mock", "meta"]

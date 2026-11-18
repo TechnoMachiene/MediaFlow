@@ -37,7 +37,7 @@ export const roleLabel: Record<Role, string> = {
 
 export type Tone = 'neutral' | 'blue' | 'green' | 'orange' | 'red';
 export interface JobState {
-  key: 'progress' | 'review' | 'approved' | 'rejected' | 'stopped';
+  key: 'progress' | 'draft' | 'review' | 'approved' | 'rejected' | 'stopped';
   label: string;
   tone: Tone;
   active: boolean;
@@ -57,6 +57,9 @@ export function jobState(job: Pick<Job, 'status' | 'approval_status'>): JobState
         return s('approved', 'Approved', 'green', 'Approved and ready to schedule.');
       if (job.approval_status === 'rejected')
         return s('rejected', 'Rejected', 'red', 'A reviewer rejected this draft.');
+      if (job.approval_status === 'with_uploader')
+        return s('draft', 'Draft ready', 'blue',
+          'Check the draft: send it for review as it is, or edit it first.');
       return s('review', 'In review', 'orange', 'Drafts are ready and waiting for a reviewer.');
     case 'queued':
       return s('progress', 'Queued', 'neutral', 'Waiting for a worker to pick this up.', true);
@@ -112,6 +115,9 @@ export const FIELD_LABELS: Record<string, string> = {
   engagement_question: 'Engagement question', accessibility_description: 'Alt text',
   translated_caption: 'English translation', detected_languages: 'Languages detected',
   primary_content_language: 'Written in', media_type: 'Media type',
+  post_type: 'Post type', alt_text: 'Alt text', first_comment: 'First comment',
+  notes: 'Notes for the team', reel_on_screen_text: 'Reel on-screen text',
+  cover_title: 'Cover title', carousel_slide_titles: 'Carousel slide titles',
   main_message: 'Main message', target_audience: 'Audience', primary_goal: 'Goal',
   suggested_cta: 'Suggested call to action', content_tone: 'Tone', key_topics: 'Key topics',
 };
@@ -175,6 +181,7 @@ export function headline(text: string | undefined | null, fallback: string): str
     str(c.instagram?.cover_text) ||
     str(c.instagram?.caption) ||
     str(c.facebook?.post_copy) ||
+    str(c.facebook?.caption) ||
     fallback
   );
 }

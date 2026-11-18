@@ -24,7 +24,7 @@ from app.api.database import (
 )
 from app.api.retention import apply_retention, collect, prune_media
 from app.storage import LocalStorage, S3Storage
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -243,8 +243,9 @@ def test_rejected_drafts_can_be_deleted_entirely_after_a_while(team):
     recent = drafted(client, runtime, h["alice"], (2, 0, 1))
     approved = drafted(client, runtime, h["alice"], (3, 0, 1))
     for job_id, decision in ((old, "rejected"), (recent, "rejected"), (approved, "approved")):
+        send_for_review(client, h["alice"], job_id)
         client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
-                     json={"status": decision, "comment": "notes"})
+                     json={"status": decision, "comment": "notes", "checked": True})
     with sessions.begin() as db:
         db.execute(update(ApiJob).where(ApiJob.id.in_([old, approved])).values(
             reviewed_at=datetime.now(timezone.utc) - timedelta(days=20)))

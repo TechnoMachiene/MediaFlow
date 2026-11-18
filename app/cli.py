@@ -49,6 +49,17 @@ def _retention_max_days() -> int:
     return int(raw) if raw else 0
 
 
+def _publish_signer():
+    """Signs the media links Instagram fetches; the API verifies them with the same secret."""
+    from app.api.config import DEMO_JWT_SECRET
+    from app.api.media_links import PUBLISHING, MediaLinkSigner
+    from app.config import env_flag
+
+    secret = os.environ.get("JWT_SECRET", "").strip() or (
+        DEMO_JWT_SECRET if env_flag("DEMO_MODE") else "")
+    return MediaLinkSigner(secret, PUBLISHING) if secret else None
+
+
 def _publishing():
     """The worker delivers publications only if it can decrypt the API's credentials, so it
     derives the same key the API does (PUBLISHING_KEY, else JWT_SECRET)."""
@@ -129,10 +140,14 @@ def main(argv: list[str] | None = None) -> int:
 
             db_engine, session_factory = create_database(database_url)
             instrument_engine(db_engine)
+            from app.api import live
+
+            live.configure(rt.r, rt.settings.prefix)  # browsers hear about the worker's changes
             configure_worker(
                 rt, session_factory, storage_from_env(), retention_days=_retention_days(),
                 retention_max_days=_retention_max_days(),
                 publishing=_publishing(),
+                publish_signer=_publish_signer(),
             )
         if not args.drain:
             metrics.serve(metrics.metrics_port())

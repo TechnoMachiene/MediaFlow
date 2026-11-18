@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.api import admin, audit
 from app.api.database import AuditEvent, Base, User, WorkspaceMember, create_database
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -49,7 +49,9 @@ def later(days=1):
 def approved_job(client, runtime, alice, max_):
     job_id = upload(client, alice, png()).json()["job_id"]
     runtime.worker.drain()
-    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=max_, json={"status": "approved"})
+    send_for_review(client, alice, job_id)
+    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=max_,
+                 json={"status": "approved", "checked": True})
     return job_id
 
 
@@ -92,6 +94,7 @@ def test_review_decisions_are_recorded_with_the_reviewer(team):
     approved = approved_job(client, runtime, alice, max_)
     rejected = upload(client, alice, png((9, 9, 9))).json()["job_id"]
     runtime.worker.drain()
+    send_for_review(client, alice, rejected)
     client.patch(f"/api/v1/jobs/{rejected}/approval", headers=max_, json={"status": "rejected"})
 
     decisions = [(e.action, e.target_id, e.actor_id, e.after["owner"])
@@ -229,7 +232,7 @@ def test_refused_and_no_op_requests_leave_no_trace(team):
                         json={"role": "user"}).status_code == 200  # already a user
     job_id = upload(client, alice, png()).json()["job_id"]
     assert client.patch(f"/api/v1/jobs/{job_id}/approval", headers=max_,
-                        json={"status": "approved"}).status_code == 409  # not done yet
+                        json={"status": "approved", "checked": True}).status_code == 409
     assert events(sessions) == []
 
 

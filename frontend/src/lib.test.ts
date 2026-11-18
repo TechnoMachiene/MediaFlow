@@ -6,6 +6,9 @@ import {
 
 describe('jobState', () => {
   it('folds queue and approval status into one state', () => {
+    expect(jobState({ status: 'done', approval_status: 'with_uploader' })).toMatchObject({
+      key: 'draft', label: 'Draft ready', active: false,
+    });
     expect(jobState({ status: 'done', approval_status: 'pending' }).key).toBe('review');
     expect(jobState({ status: 'done', approval_status: 'approved' }).key).toBe('approved');
     expect(jobState({ status: 'done', approval_status: 'rejected' }).key).toBe('rejected');

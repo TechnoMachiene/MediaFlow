@@ -1,13 +1,15 @@
 # Publishing
 
 Approved calendar entries can publish themselves at their scheduled time. Every platform sits
-behind one provider interface (`app/publishing/base.py`), and the only provider today is the
-**sandbox**: a pretend platform inside MediaFlow that behaves like a real one (consent,
-expiring tokens, rate limits, asynchronous processing, refusals) without anything leaving the
-installation.
+behind one provider interface (`app/publishing/base.py`). Two providers exist:
 
-A real platform is added only once it passes the [readiness checklist](#adding-a-real-platform)
-below. Until then, naming one in `PUBLISHING_PROVIDERS` fails at startup.
+- **`mock`, the sandbox:** a pretend platform inside MediaFlow that behaves like a real one
+  (consent, expiring tokens, rate limits, asynchronous processing, refusals) without anything
+  leaving the installation.
+- **`meta`:** a real Facebook Page and the Instagram business account linked to it, through
+  Meta's Graph API ([Meta](#meta), below).
+
+Naming any other provider in `PUBLISHING_PROVIDERS` fails at startup.
 
 ## The flow
 
@@ -144,6 +146,85 @@ simulate, and approve the sandbox's consent screen. Then open a calendar entry a
 
 The Publishing page also shows the sandbox's side: what it "published" and every request it
 received (`503`, `429`, `duplicate`, ...), as a real platform's developer console would.
+
+## Meta
+
+`app/publishing/meta.py`. Enable it with `PUBLISHING_PROVIDERS=mock,meta` (or `meta` alone)
+and the `META_*` settings in `.env` ([.env.example](../.env.example)).
+
+### Credentials
+
+The installation posts as **one** Page and its Instagram account, with a token the operator
+creates in Meta's tools, not a per-user login. This fits a company posting to its own
+accounts, needs no public OAuth redirect, and avoids Meta's app review for other people's Pages.
+
+1. **Meta Business Suite** must own the Facebook Page, and the Instagram account must be a
+   **Business** (or Creator) account **linked to that Page** (Instagram app > Settings >
+   Account type; then Page settings > Linked accounts).
+2. Create a **Meta app** at developers.facebook.com (type *Business*), add the products
+   *Facebook Login for Business* and *Instagram* (*API setup with Facebook login*), and attach
+   it to your business portfolio. For a Page and Instagram account your own business owns,
+   Meta's *Standard Access* is normally enough, without App Review. If Meta asks for
+   business verification or App Review for a permission, complete it before going live.
+3. In **Business settings > Users > System users**, add a system user (role *Admin*), assign it
+   the Page (full control) and the app, then **Generate token** for the app with
+   `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `instagram_basic`,
+   `instagram_content_publish` and `business_management`, and expiry **Never**.
+4. Put it in `.env` as `META_PAGE_ACCESS_TOKEN`, with `META_PAGE_ID` and, for Instagram,
+   `META_INSTAGRAM_ACCOUNT_ID` (find it with
+   `GET /v24.0/<page id>?fields=instagram_business_account` in the Graph API Explorer).
+   Optionally `META_APP_SECRET` (adds `appsecret_proof` to every call).
+5. Instagram downloads the media itself, so set `PUBLIC_BASE_URL` to the app's public
+   **https://** address (DEPLOYMENT.md sets up HTTPS).
+6. Restart (`docker compose up -d`). As a **platform admin**, open **Publishing**, choose
+   *Meta (Facebook and Instagram)*, pick Facebook or Instagram and select **Connect**: MediaFlow
+   checks the token with Meta and shows the account's name. Workspace admins don't see this
+   provider: the account belongs to the installation. Connect it in each workspace that should
+   post to it.
+
+Rotating the token: replace it in `.env`, restart, and select **Reconnect** on each connection.
+A revoked or expired token turns the connection to *needs reconnecting* at the next post.
+
+### What it does
+
+| Channel | Photo | Video |
+|---|---|---|
+| Facebook | `POST /{page}/photos` with the bytes and the caption: published at once | `POST /{page}/videos` on graph-video: `processing`, then `GET /{video}?fields=status` until `ready` |
+| Instagram | `POST /{ig}/media {image_url, caption}` → container; `status_code` FINISHED → `POST /{ig}/media_publish` | Same, `media_type=REELS` and `video_url`; polled every 30 s until FINISHED |
+
+- The **caption** is the channel's caption from the draft, plus any of its hashtags the
+  caption doesn't already contain.
+- **Instagram media** comes from `/api/v1/publish-media/<token>`: a link signed with its own
+  key (a browser media link can't be used there), valid for 2 hours, re-checked against the
+  database on each request (a deleted original answers `410`). Photos are re-encoded as JPEG,
+  which is the only image format Instagram takes. Re-encoding also strips EXIF data, location
+  included. Photos outside 4:5 to 1.91:1 are padded with white rather than cropped.
+- **Limits checked before calling Meta:** Instagram captions at most 2,200 characters and 30
+  hashtags. A post whose original was deleted stops as `no_media` (the drafts are kept).
+- **No idempotency keys** in the Graph API, so `idempotent=False`: if the worker dies mid-call
+  the publication becomes `unknown`, and a person checks the account before *I checked: send
+  again*. A double post is worse than a late one.
+
+### Error mapping
+
+| Graph API reply | Type | Then |
+|---|---|---|
+| HTTP 5xx, `is_transient: true`, codes 1 and 2, timeouts, connection errors | `ProviderUnavailable` | retried with backoff |
+| HTTP 429, codes 4, 17, 32, 613, 80001-80014 | `ProviderRateLimited` | retried after `estimated_time_to_regain_access` from `X-Business-Use-Case-Usage` / `X-App-Usage` (default 5 min) |
+| HTTP 401, codes 102, 190, 10, 200-299 (token, permissions) | `AuthorizationLost` | connection *needs reconnecting* |
+| Anything else (100 invalid parameter, 368 policy block, media Meta couldn't fetch or process) | `ContentRejected` | failed, with Meta's `error_user_msg` |
+
+Contract tests against recorded replies: `tests/unit/test_meta_provider.py`. End to end
+through the delivery loop: `tests/integration/test_notifications.py`.
+
+### Before switching it on
+
+- Post once to the real Page and Instagram by hand from MediaFlow (schedule a test post a few
+  minutes ahead) and look at both accounts.
+- `mediaflow_publish_outcomes_total{provider="meta"}` is on the dashboard, and failures reach
+  someone (they also notify the post's owner and the workspace admins).
+- The kill switch: remove `meta` from `PUBLISHING_PROVIDERS` and restart; queued posts then
+  stop as `provider_disabled` instead of going out.
 
 ## Adding a real platform
 

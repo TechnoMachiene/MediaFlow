@@ -16,7 +16,7 @@ from app.api.database import (
 )
 from app.api.persistence import persist_api_result
 from app.errors import Permanent
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -55,12 +55,24 @@ def at(sessions, job_id, *, created, started=None, completed=None):
 
 
 def decide(client, h, job_id, status, when, sessions):
-    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"], json={"status": status})
+    with sessions() as db:
+        waiting = db.get(ApiJob, job_id).approval_status == "with_uploader"
+    if waiting:
+        send_for_review(client, h["alice"], job_id)
+    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
+                 json={"status": status, "checked": True})
     with sessions.begin() as db:
         event = db.scalars(select(AuditEvent).where(
             AuditEvent.target_id == job_id, AuditEvent.action == f"job.{status}")
             .order_by(AuditEvent.id.desc())).first()
         event.created_at = when
+
+
+def sent(sessions, job_id, when):
+    with sessions.begin() as db:
+        db.scalars(select(AuditEvent).where(
+            AuditEvent.target_id == job_id, AuditEvent.action == "draft.submitted")
+            .order_by(AuditEvent.id.desc())).first().created_at = when
 
 
 def reopen(sessions, job_id):
@@ -218,12 +230,26 @@ def test_review_as_the_bottleneck_and_a_stale_backlog_are_called_out(team):
            completed=start + timedelta(seconds=45))
         decide(client, h, job_id, "approved", start + timedelta(hours=20), sessions)
     waiting = drafted(client, runtime, h["alice"], 9)
-    at(sessions, waiting, created=T0, completed=datetime.now(timezone.utc) - timedelta(days=2))
+    at(sessions, waiting, created=T0, completed=datetime.now(timezone.utc) - timedelta(days=3))
+    send_for_review(client, h["alice"], waiting)
+    sent(sessions, waiting, datetime.now(timezone.utc) - timedelta(days=2))
+    unsent = drafted(client, runtime, h["alice"], 10)  # still with its uploader: not a backlog
+    at(sessions, unsent, created=T0, completed=datetime.now(timezone.utc) - timedelta(days=9))
 
     found = kinds(report(client, h["max"]))
     assert found["bottleneck"]["severity"] == "warn"
     assert "waiting for review" in found["bottleneck"]["text"]
-    assert "1 draft(s) are waiting for review" in found["backlog"]["text"]
+    assert "1 draft(s) are waiting for review; the oldest for 2.0 days" in found["backlog"]["text"]
+
+
+def test_review_wait_starts_when_the_uploader_sends_the_draft(team):
+    client, runtime, sessions, h, _ = team
+    job_id = drafted(client, runtime, h["alice"], 1)
+    at(sessions, job_id, created=T0, started=T0, completed=T0 + timedelta(seconds=30))
+    send_for_review(client, h["alice"], job_id)
+    sent(sessions, job_id, T0 + timedelta(days=2))  # the uploader took two days to check it
+    decide(client, h, job_id, "approved", T0 + timedelta(days=2, hours=1), sessions)
+    assert report(client, h["max"])["timings"]["review_wait"]["p50"] == 3600
 
 
 def test_insights_need_enough_data(team):

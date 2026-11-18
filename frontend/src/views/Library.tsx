@@ -7,10 +7,11 @@ import { ACCEPT_ATTR, uploads, useUploads, type Upload } from '../uploads';
 import { JobSheet } from './JobSheet';
 import { JobTile, TileSkeletons } from './JobTile';
 
-type Filter = 'all' | 'progress' | 'review' | 'approved' | 'rejected';
+type Filter = 'all' | 'progress' | 'draft' | 'review' | 'approved' | 'rejected';
 const FILTERS: { value: Filter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'progress', label: 'In progress' },
+  { value: 'draft', label: 'Draft ready' },
   { value: 'review', label: 'In review' },
   { value: 'approved', label: 'Approved' },
   { value: 'rejected', label: 'Rejected' },

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import {
   addMonths, fmt, headline, localTz, monthGrid, timezones, todayIn, tzLabel,
@@ -47,6 +48,7 @@ export function Calendar() {
     }
   }, [days, tz]);
 
+  useLive(['calendar', 'jobs'], load);
   useEffect(() => {
     void load();
   }, [load]);

@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, mediaUrl } from '../api';
 import {
-  CANCELLABLE, addDays, fmt, isAdmin, isReviewer, jobState, localTz, timezones, todayIn,
+  CANCELLABLE, addDays, fieldLabel, fmt, isAdmin, isReviewer, jobState, localTz, timezones, todayIn,
   tzLabel, wallClock, zonedToInstant,
 } from '../lib';
 import { Sheet } from '../Sheet';
 import { useSession } from '../session';
 import { useToast } from '../toast';
-import type { Job, Post } from '../types';
+import type { DraftCheck, Job, Post } from '../types';
 import { DraftPanel } from './Draft';
 import {
   Button, ConfirmButton, ErrorNote, Field, Icon, JobBadge, Spinner, useLast,
@@ -193,7 +193,10 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
   const [scheduling, setScheduling] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
+  const [factsChecked, setFactsChecked] = useState(false);
   const state = jobState(job);
+  const checks = job.checks ?? [];
+  const gaps = checks.filter((c) => c.level === 'block');
   const canEdit = (owned || isReviewer(user.role)) && job.status === 'done' && !!job.result;
 
   const canCancel = (owned || isAdmin(user.role)) && CANCELLABLE.has(job.status);
@@ -202,6 +205,8 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
   const canReview =
     isReviewer(user.role) && job.status === 'done' && job.approval_status === 'pending';
   const canSchedule = owned && job.status === 'done' && job.approval_status === 'approved';
+  const canSend = (owned || isAdmin(user.role)) && job.status === 'done' && !!job.result &&
+    job.approval_status === 'with_uploader';
 
   async function run<T>(name: string, work: () => Promise<T>, then: (value: T) => void) {
     setBusy(name);
@@ -216,11 +221,19 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
   }
 
   const decide = (status: 'approved' | 'rejected', comment?: string) =>
-    run(status, () => api<Job>('PATCH', `/jobs/${job.job_id}/approval`, { status, comment }), (next) => {
+    run(status, () => api<Job>('PATCH', `/jobs/${job.job_id}/approval`, {
+      status, comment, checked: status === 'approved' ? factsChecked : undefined,
+    }), (next) => {
       onChanged(next);
       onReviewed?.(next);
       toast(status === 'approved' ? 'Approved' : 'Rejected');
       onClose();
+    });
+
+  const send = () =>
+    run('send', () => api<Job>('POST', `/jobs/${job.job_id}/submit`), (next) => {
+      onChanged(next);
+      toast('Sent for review');
     });
 
   const cancel = () =>
@@ -271,11 +284,34 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
       ) : (
         <>
           {error && <ErrorNote message={error} />}
-          {(canReview || canSchedule || canCancel) && (
+          {(canSend || canReview) && <DraftChecks checks={checks} />}
+          {canReview && !rejecting && (
+            <label className="confirm-facts">
+              <input type="checkbox" checked={factsChecked} disabled={gaps.length > 0}
+                onChange={(e) => setFactsChecked(e.target.checked)} />
+              <span>
+                I've checked every name, price, date and place against the brief and fact sheet.
+                Gemini's drafts are suggestions and can be wrong.
+              </span>
+            </label>
+          )}
+          {canSend && (
+            <p className="footnote">
+              {owned ? 'Only you can see this draft for now.' : 'The uploader hasn\'t sent this yet.'}
+              {' '}Edit anything that's wrong, then send it to a reviewer.
+            </p>
+          )}
+          {(canSend || canReview || canSchedule || canCancel) && (
             <div className="job-actions">
+              {canSend && (
+                <Button variant="primary" busy={busy === 'send'} disabled={!!busy} onClick={send}>
+                  Send for review
+                </Button>
+              )}
               {canReview && (
                 <>
-                  <Button variant="primary" busy={busy === 'approved'} disabled={!!busy}
+                  <Button variant="primary" busy={busy === 'approved'}
+                    disabled={!!busy || !factsChecked || gaps.length > 0}
                     onClick={() => decide('approved')}>
                     Approve
                   </Button>
@@ -329,20 +365,39 @@ function JobDetail({ job, owned, onClose, onChanged, onReviewed }: Props & { job
           )}
           {canReview && !rejecting && (
             <p className="footnote">
-              Approved drafts can be scheduled by the person who uploaded them. If anyone edits a
-              draft later, it comes back here for review.
+              Approved drafts can be scheduled by the person who uploaded them. If the uploader
+              edits a draft later, it goes back to them until they send it again; if a reviewer
+              edits it, it comes back here.
             </p>
           )}
         </>
       )}
 
-      {job.result && <DraftPanel job={job} canEdit={canEdit} onChanged={onChanged} />}
+      {job.result && <DraftPanel job={job} owned={owned} canEdit={canEdit} onChanged={onChanged} />}
       {job.result && (
         <p className="footnote">
           Drafted by {job.result.model}
           {job.cached ? ' · reused from identical media' : ''}
         </p>
       )}
+    </div>
+  );
+}
+
+/** What to verify before approving (server-side rules: app/draft_checks.py). */
+function DraftChecks({ checks }: { checks: DraftCheck[] }) {
+  if (!checks.length) return null;
+  const gaps = checks.filter((c) => c.level === 'block');
+  return (
+    <div className={`callout checks ${gaps.length ? 'callout-red' : ''}`}>
+      <strong>{gaps.length ? 'Fix before approving' : 'Check before approving'}</strong>
+      <ul>
+        {checks.map((c, i) => (
+          <li key={i} className={c.level}>
+            {c.field && <span className="quiet">{fieldLabel(c.field)}: </span>}{c.message}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

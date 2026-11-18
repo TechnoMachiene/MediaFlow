@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.database import ApiJob, User, WorkspaceMember
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -41,16 +41,21 @@ def test_jobs_media_review_and_lists_are_invisible_across_workspaces(tenants):
         assert client.get(f"/api/v1/jobs/{job_id}/media", headers=headers).status_code == 404
         assert client.delete(f"/api/v1/jobs/{job_id}", headers=headers).status_code == 404
     assert client.patch(
-        f"/api/v1/jobs/{job_id}/approval", headers=bea, json={"status": "approved"}
+        f"/api/v1/jobs/{job_id}/approval", headers=bea, json={"status": "approved", "checked": True}
     ).status_code == 404
     for path in ("/jobs", "/jobs/review", "/jobs/approved", "/jobs/mine"):
         assert client.get(f"/api/v1{path}", headers=bea).json()["items"] == []
+
+    # Workspace B can't send it for review either; its uploader can.
+    assert client.post(f"/api/v1/jobs/{job_id}/submit", headers=bea).status_code == 404
+    send_for_review(client, alice, job_id)
 
     # Workspace A's admin sees it and can approve it; the owner can schedule it.
     assert [j["job_id"] for j in client.get("/api/v1/jobs/review", headers=anna).json()["items"]
             ] == [job_id]
     assert client.patch(
-        f"/api/v1/jobs/{job_id}/approval", headers=anna, json={"status": "approved"}
+        f"/api/v1/jobs/{job_id}/approval", headers=anna,
+        json={"status": "approved", "checked": True},
     ).status_code == 200
     when = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     post = client.post(

@@ -77,6 +77,7 @@ class _Claim:
     credentials: Credentials
     payload: Payload | None
     external_id: str | None
+    media: object | None = None  # JobMedia, for providers that post the photo or video
 
 
 class Deliverer:
@@ -94,8 +95,11 @@ class Deliverer:
         refresh_margin_s: float = 120.0,
         batch: int = 50,
         now: Callable[[], datetime] = utcnow,
+        media=None,  # app.publishing.media.MediaResolver
+        notify: Callable | None = None,  # app.api.notifications.publication_outcome
     ):
         self.sessions, self.providers, self.cipher = session_factory, providers, cipher
+        self.media, self.notify = media, notify
         self.lease = timedelta(seconds=lease_s)
         self.max_attempts, self.batch, self.now = max_attempts, batch, now
         self.backoff_base_s, self.backoff_cap_s = backoff_base_s, backoff_cap_s
@@ -133,6 +137,10 @@ class Deliverer:
             if claim.action == "check":
                 receipt = claim.provider.check(credentials, claim.external_id,
                                                account_id=claim.account_id, options=claim.options)
+            elif claim.provider.info.needs_media:
+                receipt = claim.provider.publish(credentials, claim.payload,
+                                                 account_id=claim.account_id,
+                                                 options=claim.options, media=claim.media)
             else:
                 receipt = claim.provider.publish(credentials, claim.payload,
                                                  account_id=claim.account_id,
@@ -180,7 +188,13 @@ class Deliverer:
                             extra={"publication_id": pub.id})
                 action = "check" if pub.external_id else "publish"
 
-            payload = None
+            payload, media = None, None
+            if action == "publish" and provider.info.needs_media:
+                media = self.media.for_job(db, job) if self.media is not None else None
+                if media is None:
+                    return None, self._stop(pub, "failed", "no_media",
+                                            "The original photo or video was deleted, so "
+                                            "there's nothing to post. The drafts are kept.", conn)
             if action == "publish":
                 try:
                     body, hashtags = compose(job.result["text"], conn.channel)
@@ -201,12 +215,14 @@ class Deliverer:
                 publication_id=pub.id, attempt=pub.attempts, action=action, provider=provider,
                 connection_id=conn.id, account_id=conn.account_id, options=dict(conn.options),
                 credentials=credentials, payload=payload, external_id=pub.external_id,
+                media=media,
             ), None
 
     def _stop(self, pub: Publication, status: str, code: str, message: str,
               conn: PublishingConnection | None) -> str:
         pub.status, pub.error_code, pub.last_error = status, code, message[:500]
         pub.locked_until = pub.next_attempt_at = None
+        self._tell(pub)
         self._count(conn.provider if conn else "unknown", code)
         log.info("publication stopped", extra={"publication_id": pub.id, "code": code})
         return code
@@ -250,6 +266,7 @@ class Deliverer:
             pub.locked_until = None
             if receipt.state == "published":
                 pub.status, pub.published_at, pub.next_attempt_at = "published", now, None
+                self._tell(pub)
             else:
                 pub.status, pub.next_attempt_at = "processing", now + self.check_every
         self._count(claim.provider.info.name, receipt.state)
@@ -276,10 +293,24 @@ class Deliverer:
             else:
                 pub.status, pub.next_attempt_at = "failed", None
                 outcome = "failed"
+            if pub.status == "failed":
+                self._tell(pub)
         self._count(claim.provider.info.name, outcome if outcome != "failed" else err.code)
         log.warning("publication %s", outcome, extra={
             "publication_id": claim.publication_id, "code": err.code})
         return outcome
+
+    def _tell(self, pub: Publication) -> None:
+        """Stage the people's notification in the same transaction as the outcome."""
+        if self.notify is None or pub.status not in ("published", "failed", "unknown"):
+            return
+        db = Session.object_session(pub)
+        try:
+            with db.begin_nested():
+                self.notify(db, pub)
+        except Exception:  # a notification must never undo a delivery outcome
+            log.exception("could not stage the publication notification",
+                          extra={"publication_id": pub.id})
 
     def _delay(self, attempt: int, err: PublishError) -> float:
         backoff = min(self.backoff_cap_s, self.backoff_base_s * 2 ** (attempt - 1))

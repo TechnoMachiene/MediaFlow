@@ -58,7 +58,14 @@ def persist_api_status(
 
 def attach(worker, session_factory: Callable[[], Session]) -> None:
     """Wire a worker's hooks to the database."""
-    worker.on_result = lambda job_id, result: persist_api_result(session_factory, job_id, result)
-    worker.on_status = lambda job_id, status, error: persist_api_status(
-        session_factory, job_id, status, error
-    )
+    from app.api import live
+
+    def on_result(job_id, result):
+        persist_api_result(session_factory, job_id, result)
+        live.announce_job(session_factory, job_id)  # direct SQL: the ORM hooks don't see it
+
+    def on_status(job_id, status, error):
+        persist_api_status(session_factory, job_id, status, error)
+        live.announce_job(session_factory, job_id)
+
+    worker.on_result, worker.on_status = on_result, on_status

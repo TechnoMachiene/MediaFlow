@@ -78,7 +78,7 @@ class MockProvider(Provider):
         # The sandbox consent screen is a page of the web app (#/publishing/sandbox).
         return f"/#/publishing/sandbox?state={state}&challenge={code_challenge}"
 
-    def exchange_code(self, *, code, code_verifier, redirect_uri, options) -> Grant:
+    def exchange_code(self, *, code, code_verifier, redirect_uri, options, channel="") -> Grant:
         if code == "access_denied":
             raise AuthorizationDenied("Access was not granted on the sandbox consent screen")
         try:
@@ -114,7 +114,7 @@ class MockProvider(Provider):
 
     # ── Posting ──────────────────────────────────────────────────────────────────────────
 
-    def publish(self, credentials, payload: Payload, *, account_id, options) -> Receipt:
+    def publish(self, credentials, payload: Payload, *, account_id, options, media=None) -> Receipt:
         key = payload.idempotency_key
         behavior = options.get("behavior", "succeed")
         with self.sessions() as db:

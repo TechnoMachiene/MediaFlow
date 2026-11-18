@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import {
   FIELD_LABELS, SECTION_LABELS, diffContent, fieldLabel, fieldPaths, fmt, humanize, parseContent,
@@ -16,8 +17,8 @@ const message = (err: unknown, fallback: string) => (err instanceof ApiError ? e
  * `canEdit` is the same for both (the server enforces it too).
  */
 export function DraftPanel({
-  job, canEdit, onChanged,
-}: { job: Job; canEdit: boolean; onChanged: (job: Job) => void }) {
+  job, owned = false, canEdit, onChanged,
+}: { job: Job; owned?: boolean; canEdit: boolean; onChanged: (job: Job) => void }) {
   const [tab, setTab] = useState<Tab>('draft');
   const [editing, setEditing] = useState(false);
   const [comments, setComments] = useState<DraftComment[]>([]);
@@ -29,6 +30,7 @@ export function DraftPanel({
     api<DraftComment[]>('GET', `/jobs/${job.job_id}/comments`).then(setComments, () => {});
   }, [job.job_id]);
   useEffect(loadComments, [loadComments]);
+  useLive(['jobs'], loadComments);
 
   const refresh = useCallback(async () => {
     onChanged(await api<Job>('GET', `/jobs/${job.job_id}`));
@@ -62,6 +64,7 @@ export function DraftPanel({
       {tab === 'draft' && (editing ? (
         <DraftEditor
           job={job}
+          owned={owned}
           onCancel={() => setEditing(false)}
           onSaved={async () => { setEditing(false); await refresh(); }}
           onReload={refresh}
@@ -97,11 +100,33 @@ function clone(text: string): Structured | string {
 const serialize = (draft: Structured | string) =>
   typeof draft === 'string' ? draft : JSON.stringify(draft, null, 2);
 
+/** What saving does to the draft's place in the workflow (mirrors app/api/drafts.py). */
+function saveEffect(job: Job, owned: boolean): string | null {
+  const status = job.approval_status;
+  if (status === 'with_uploader') {
+    return owned
+      ? "Your changes stay with you. Send the draft for review when it's ready."
+      : "The uploader hasn't sent this draft for review yet. Your version stays with them.";
+  }
+  if (owned) {
+    return status === 'pending'
+      ? 'Saving a change takes this draft out of review until you send it again.'
+      : `This draft is ${status}. Saving a change brings it back to you to send for review again.`;
+  }
+  return status === 'pending' ? null : `This draft is ${status}. Saving a change sends it back for review.`;
+}
+
 export function DraftEditor({
-  job, onCancel, onSaved, onReload,
-}: { job: Job; onCancel: () => void; onSaved: () => void; onReload: () => void }) {
+  job, owned = false, onCancel, onSaved, onReload,
+}: {
+  job: Job; owned?: boolean; onCancel: () => void; onSaved: () => void; onReload: () => void;
+}) {
   const toast = useToast();
-  const original = job.result!.text;
+  // What this edit started from. Live updates may bring a newer version in while typing; the
+  // save still names the version it was based on, so the server refuses to overwrite theirs.
+  const [base] = useState(() => ({ version: job.draft_version ?? 1, text: job.result!.text }));
+  const original = base.text;
+  const newer = (job.draft_version ?? 1) !== base.version;
   const [draft, setDraft] = useState(() => clone(original));
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -121,11 +146,13 @@ export function DraftEditor({
     setError('');
     try {
       const out = await api<DraftSaved>('POST', `/jobs/${job.job_id}/versions`, {
-        base_version: job.draft_version ?? 1, text: serialize(draft), note: note.trim() || undefined,
+        base_version: base.version, text: serialize(draft), note: note.trim() || undefined,
       });
-      toast(out.returned_to_review
-        ? `Saved as version ${out.version.number}. It's back in review.`
-        : `Saved as version ${out.version.number}`);
+      const n = out.version.number;
+      toast(out.returned_to_review ? `Saved as version ${n}. It's back in review.`
+        : out.approval_status === 'with_uploader' && owned
+          ? `Saved as version ${n}. Send it for review when it's ready.`
+          : `Saved as version ${n}`);
       onSaved();
     } catch (err) {
       setError(message(err, 'Could not save the draft.'));
@@ -136,9 +163,11 @@ export function DraftEditor({
 
   return (
     <form className="form draft-editor" onSubmit={save} noValidate>
-      {job.approval_status !== 'pending' && (
-        <p className="callout">
-          This draft is {job.approval_status}. Saving a change sends it back for review.
+      {saveEffect(job, owned) && <p className="callout">{saveEffect(job, owned)}</p>}
+      {newer && (
+        <p className="callout callout-red" role="status">
+          Someone saved version {job.draft_version} while you were editing. Saving now will be
+          refused; copy anything you need, then Cancel and edit the new version.
         </p>
       )}
       {typeof draft === 'string' ? (

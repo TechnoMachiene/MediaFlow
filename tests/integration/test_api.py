@@ -395,7 +395,20 @@ def test_manager_review_lists_and_approval_actions(api_client, make_image):
         )
         assert response.status_code in {200, 202}
         runtime.worker.drain()
-        return response.json()["job_id"]
+        job_id = response.json()["job_id"]
+        # A fresh draft waits for its uploader; the manager can't decide on it yet.
+        assert client.patch(
+            f"/api/v1/jobs/{job_id}/approval", headers=manager_headers,
+            json={"status": "approved", "checked": True},
+        ).status_code == 409
+        assert job_id not in {
+            item["job_id"]
+            for item in client.get("/api/v1/jobs/review", headers=manager_headers).json()["items"]
+        }
+        sent = client.post(f"/api/v1/jobs/{job_id}/submit", headers=headers)
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["approval_status"] == "pending"
+        return job_id
 
     approved_id = submit(user_headers)
     review_list = client.get("/api/v1/jobs/review", headers=manager_headers)
@@ -414,7 +427,7 @@ def test_manager_review_lists_and_approval_actions(api_client, make_image):
     approved = client.patch(
         f"/api/v1/jobs/{approved_id}/approval",
         headers=manager_headers,
-        json={"status": "approved"},
+        json={"status": "approved", "checked": True},
     )
     assert approved.status_code == 200
     assert approved.json()["approval_status"] == "approved"
@@ -521,9 +534,11 @@ def test_image_video_review_and_calendar_user_workflow(
     assert set(uploaded_jobs.values()) <= mine_by_id.keys()
     for kind, job_id in uploaded_jobs.items():
         assert mine_by_id[job_id]["status"] == "done"
-        assert mine_by_id[job_id]["approval_status"] == "pending"
+        assert mine_by_id[job_id]["approval_status"] == "with_uploader"
         assert mine_by_id[job_id]["media_kind"] == kind
         assert mine_by_id[job_id]["result"]["text"].startswith("scripted analysis")
+        sent = client.post(f"/api/v1/jobs/{job_id}/submit", headers=owner_headers)
+        assert sent.status_code == 200, sent.text
     assert client.get("/api/v1/jobs/mine", headers=other_headers).json()["items"] == []
 
     review = client.get("/api/v1/jobs/review", headers=manager_headers)
@@ -538,7 +553,7 @@ def test_image_video_review_and_calendar_user_workflow(
         response = client.patch(
             f"/api/v1/jobs/{job_id}/approval",
             headers=manager_headers,
-            json={"status": decision},
+            json={"status": decision, "checked": True},
         )
         assert response.status_code == 200, response.text
         assert response.json()["approval_status"] == decision

@@ -63,10 +63,16 @@ class LinkClaim:
     expires: int
 
 
+BROWSER = b"mediaflow media links v1"
+# Links handed to a platform (Instagram fetches the media itself). A separate key, so a
+# browser link can't be replayed on the publishing route or the other way round.
+PUBLISHING = b"mediaflow publish media v1"
+
+
 class MediaLinkSigner:
-    def __init__(self, jwt_secret: str):
+    def __init__(self, jwt_secret: str, purpose: bytes = BROWSER):
         self._key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
-                         info=b"mediaflow media links v1").derive(jwt_secret.encode())
+                         info=purpose).derive(jwt_secret.encode())
 
     def _sig(self, body: str) -> str:
         return _b64(hmac.new(self._key, body.encode(), hashlib.sha256).digest())
@@ -142,3 +148,68 @@ def serve_signed_media(token: str, request: Request, db: DbSession):
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# ── Media for a platform to fetch ─────────────────────────────────────────────────────────
+
+IG_RATIO = (4 / 5, 1.91)  # Instagram's feed limits, width / height
+IG_MAX_SIDE = 1440
+
+
+def instagram_jpeg(path_or_file) -> bytes:
+    """Instagram accepts JPEG only, within 4:5 to 1.91:1. Re-encode (which also drops EXIF,
+    location included), turn by the EXIF orientation, and pad with white to the nearest
+    allowed shape rather than crop anything out of the photo."""
+    import io
+
+    from PIL import Image, ImageOps
+
+    with Image.open(path_or_file) as im:
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        im.thumbnail((IG_MAX_SIDE, IG_MAX_SIDE))
+        w, h = im.size
+        low, high = IG_RATIO
+        if w / h < low:
+            canvas = Image.new("RGB", (round(h * low), h), "white")
+        elif w / h > high:
+            canvas = Image.new("RGB", (w, round(w / high)), "white")
+        else:
+            canvas = None
+        if canvas is not None:
+            canvas.paste(im, ((canvas.width - w) // 2, (canvas.height - h) // 2))
+            im = canvas
+        out = io.BytesIO()
+        im.save(out, "JPEG", quality=90, optimize=True)
+        return out.getvalue()
+
+
+@router.get("/publish-media/{token}", include_in_schema=False)
+def serve_publish_media(token: str, request: Request, db: DbSession):
+    """The original, for a platform's servers (no session). Images always come back as JPEG."""
+    from fastapi.responses import Response, StreamingResponse
+
+    signer = getattr(request.app.state, "publish_signer", None)
+    if signer is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Media not found")
+    claim = signer.verify(token)
+    job = db.get(ApiJob, claim.job_id)
+    if job is None or job.workspace_id != claim.workspace_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Media not found")
+    if job.media_deleted_at is not None or _current_key(db, job) != claim.key:
+        raise HTTPException(status.HTTP_410_GONE, GONE)
+    storage = request.app.state.storage
+    headers = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+               "X-Content-Type-Options": "nosniff"}
+    if job.media_kind == "image":
+        import io
+
+        local = storage.local_path(claim.key)
+        source = local if local is not None else io.BytesIO(
+            b"".join(storage.read_chunks(claim.key)))
+        return Response(instagram_jpeg(source), media_type="image/jpeg", headers=headers)
+    media_type = ALLOWED[Path(job.filename).suffix.lower()][1]
+    local = storage.local_path(claim.key)
+    if local is not None:
+        return FileResponse(local, media_type=media_type, headers=headers)
+    return StreamingResponse(storage.read_chunks(claim.key), media_type=media_type,
+                             headers=headers)

@@ -13,6 +13,9 @@ possible, and says so.
 | `JWT_SECRET` | 32+ random bytes: `openssl rand -hex 32` | Refused below 32 bytes |
 | `PUBLISHING_KEY` | A Fernet key, separate from `JWT_SECRET` | Optional, but without it, rotating `JWT_SECRET` forces every publishing account to reconnect ([PUBLISHING.md](PUBLISHING.md)) |
 | `GEMINI_API_KEY` | Restricted to this project in AI Studio | |
+| `META_PAGE_ACCESS_TOKEN` | A system-user token with only the permissions in PUBLISHING.md; anyone holding it can post as your Page. Set `META_APP_SECRET` too and turn on *Require app secret* in the Meta app | Checked against Meta when an account is connected |
+| `SMTP_PASSWORD` | An app password or API key for a sending-only account, not a person's mailbox password | |
+| `PUBLIC_BASE_URL` | The public `https://` address (Instagram fetches media from it; emails link to it) | Instagram connections are refused without `https://` |
 | `ALLOW_SIGNUP` | Leave `0` unless you mean to let strangers create workspaces (each can spend your Gemini quota) | Default off |
 
 Keep `.env` readable only by the deploying user (`chmod 600 .env`). It is never copied into the
@@ -120,6 +123,8 @@ originals that retention has since deleted.
 - [ ] `.env` has strong `POSTGRES_PASSWORD`, `JWT_SECRET` and `PUBLISHING_KEY`; `chmod 600 .env`
 - [ ] `docker compose -f compose.yaml -f compose.proxy.yaml up -d --wait` behind your domain;
       `https://` loads and `http://` redirects
+- [ ] Meta: one real post checked by hand on the Page and on Instagram (PUBLISHING.md, "Meta")
+- [ ] Email: a test invitation arrives (not in spam); the sender domain has SPF and DKIM
 - [ ] The first admin exists (`make docker-admin EMAIL=...`), and `ALLOW_SIGNUP` is as intended
 - [ ] `python -m app.cli storage-check` passes (S3: no public access, encryption, versioning rule)
 - [ ] Workspace retention policies reviewed ([STORAGE.md](STORAGE.md))

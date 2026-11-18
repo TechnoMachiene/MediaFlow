@@ -9,7 +9,9 @@ address with a role, and the person holding the link accepts it.
   accept. This is the only way an account joins a second workspace, so no tenant can pull in, or
   take over, someone else's account without that person's consent.
 
-Tokens are `secrets.token_urlsafe(32)` (256 bits). Only their SHA-256 is stored, they travel in
+Tokens are `secrets.token_urlsafe(32)` (256 bits). Only their SHA-256 is stored (plus, when
+email is on, a copy sealed with the publishing cipher in the email outbox, erased once the email
+is sent: app/api/notifications.py), they travel in
 request bodies rather than URLs (so they never reach access logs), they expire after
 INVITATION_TTL_HOURS, and a guarded UPDATE makes each one single-use even under concurrent
 accepts. See docs/TENANCY.md.
@@ -27,7 +29,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api import audit
+from app.api import audit, notifications
 from app.api.database import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from app.api.dependencies import (
     CurrentMember,
@@ -150,10 +152,15 @@ def create_invitation(
         after={"role": inv.role, "expires_at": inv.expires_at.isoformat(),
                "replaced_links": replaced},
     )
+    emailed = notifications.invitation(
+        db, workspace_id=actor.workspace_id, email=inv.email, token=token, role=inv.role,
+        inviter_email=actor.email, cipher=request.app.state.cipher,
+    )
     db.commit()
     log.info("invitation created", extra={"invitation_id": inv.id, "role": inv.role})
     return InvitationCreated(
-        **_view(inv, actor.email).model_dump(), token=token, accept_path=f"/#/invite/{token}"
+        **_view(inv, actor.email).model_dump(), token=token, accept_path=f"/#/invite/{token}",
+        emailed=emailed,
     )
 
 

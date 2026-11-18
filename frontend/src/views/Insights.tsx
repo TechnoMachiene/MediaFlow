@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import { SECTION_LABELS, humanize, localTz } from '../lib';
 import { useSession } from '../session';
@@ -64,6 +65,7 @@ export function Insights() {
     }
   }, [range]);
   useEffect(() => { void load(); }, [load]);
+  useLive(['jobs', 'calendar', 'publishing'], load, 3000);
 
   return (
     <div className="page">

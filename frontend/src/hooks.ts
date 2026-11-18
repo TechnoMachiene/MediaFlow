@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLive } from './live';
 import { ApiError, fetchJobs } from './api';
 import type { Job } from './types';
 
@@ -33,6 +34,7 @@ export function useJobs(path: string, shouldPoll: (jobs: Job[]) => boolean = () 
     setError('');
     void load();
   }, [load]);
+  useLive(['jobs'], load); // someone else uploaded, sent, decided or edited
 
   const polling = jobs !== null && shouldPoll(jobs);
   useEffect(() => {

@@ -312,13 +312,14 @@ h4 {
 
 .segmented {
   display: inline-flex;
+  /* Long option lists (Audit's filters) wrap onto another line instead of scrolling out of
+     sight behind a hidden scrollbar, so every option stays visible at any width. */
+  flex-wrap: wrap;
   justify-self: start;
   max-width: 100%;
   padding: 2px;
   border-radius: 0.625rem;
   background: var(--fill);
-  overflow-x: auto;
-  scrollbar-width: none;
 }
 .segmented button {
   position: relative;
@@ -394,6 +395,9 @@ h4 {
 }
 .field {
   display: grid;
+  /* Side by side in a .form-row, a field without a hint must not stretch its label and
+     control to match a neighbour that has one: everything sits at the top, aligned. */
+  align-content: start;
   gap: 0.375rem;
   min-width: 0;
 }
@@ -621,6 +625,7 @@ select:focus-visible {
 }
 .tab {
   flex: 1;
+  min-width: 0;
   display: grid;
   justify-items: center;
   align-content: center;
@@ -631,6 +636,12 @@ select:focus-visible {
   letter-spacing: 0.01em;
   color: var(--text-3);
   transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.tab span {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap; /* never break a label mid-word */
+  text-overflow: ellipsis;
 }
 .tab .icon {
   width: 1.5rem;
@@ -722,7 +733,13 @@ select:focus-visible {
   padding: 1rem var(--gutter) 0;
 }
 .page-body.narrow {
-  max-width: 46rem;
+  --narrow: 46rem;
+  max-width: var(--narrow);
+  margin-inline: auto;
+}
+/* A narrow page's title lines up with its centred column instead of the window's edge. */
+.page:has(> .page-body.narrow) > .page-header {
+  padding-inline: max(var(--gutter), (100% - 46rem) / 2 + var(--gutter));
 }
 .toolbar {
   display: flex;
@@ -1866,4 +1883,118 @@ button.tile:active {
 .meter span { display: block; height: 100%; background: var(--viz-seq); }
 @media (max-width: 40rem) {
   .stage-bars li { grid-template-columns: 1fr; gap: 0.25rem; }
+}
+
+/* ── Notifications ───────────────────────────────────────────────────────── */
+
+.bell-btn {
+  position: relative;
+}
+.bell-btn > span:first-child {
+  display: inline-grid;
+}
+/* Something unread: the bell turns blue on a tinted disc, and its count badge pulses softly. */
+.bell-btn.has-unread {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.bell-btn.has-unread .bell-count {
+  animation: bell-pulse 2.4s ease-in-out infinite;
+}
+/* Something new just arrived: the bell rings. */
+.bell-ring {
+  transform-origin: 50% 12%;
+  animation: bell-ring 0.9s ease-in-out 2;
+}
+@keyframes bell-ring {
+  0%, 100% { transform: rotate(0); }
+  15% { transform: rotate(16deg); }
+  30% { transform: rotate(-14deg); }
+  45% { transform: rotate(10deg); }
+  60% { transform: rotate(-8deg); }
+  75% { transform: rotate(4deg); }
+}
+@keyframes bell-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 45%, transparent); }
+  50% { box-shadow: 0 0 0 0.3rem color-mix(in srgb, var(--red) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the colour change and the message; drop the movement. */
+  .bell-ring,
+  .bell-btn.has-unread .bell-count {
+    animation: none;
+  }
+}
+.toast-notice .icon {
+  color: var(--accent);
+}
+.bell-count {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.15rem;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--red);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.15rem;
+  text-align: center;
+}
+.notifications {
+  display: grid;
+  gap: 1rem;
+}
+.notification .row-main {
+  display: grid;
+  gap: 0.15rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  text-align: left;
+}
+.notification.unread .row-title {
+  font-weight: 600;
+}
+.rows li + li .notification::before {
+  inset: 0 0 auto 1rem;
+}
+.unread-dot {
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 1rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ── Checks before approving ─────────────────────────────────────────────── */
+
+.checks {
+  display: grid;
+  gap: 0.5rem;
+}
+.checks ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+.checks .block {
+  color: var(--red);
+}
+.confirm-facts {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+.confirm-facts input {
+  margin-top: 0.2rem;
+}
+
+.more-links {
+  display: grid;
+  gap: 0.25rem;
 }

@@ -11,10 +11,11 @@ import tempfile
 import time
 from typing import Protocol
 
+from app.copy_format import normalize
 from app.errors import MediaError, Permanent, RateLimited, Transient
 from app.jobs import JobSpec
 from app.media import compress_video, prep_image
-from app.system_prompt import SYSTEM_PROMPT
+from app.system_prompt import NO_BRIEF
 
 
 class AnalysisClient(Protocol):
@@ -78,10 +79,12 @@ class GeminiClient:
                 )
             config = types.GenerateContentConfig(
                 media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
-                system_instruction=SYSTEM_PROMPT,
+                # The prompt this job was queued with (and cached under), not whatever the
+                # process loaded last.
+                system_instruction=spec.prompt,
             )
             resp = self.client.models.generate_content(
-                model=spec.model, contents=[part], config=config
+                model=spec.model, contents=[part, NO_BRIEF], config=config
             )
         except (Permanent, Transient, RateLimited):
             raise
@@ -104,7 +107,10 @@ class GeminiClient:
             raise Permanent("empty or blocked response")
         usage = getattr(resp, "usage_metadata", None)
         return {
-            "text": text,
+            # The labelled reply as the app's structured draft (app/copy_format.py); the
+            # original is kept beside it.
+            "text": normalize(text),
+            "source_text": text,
             "kind": spec.kind,
             "model": spec.model,
             "tokens": getattr(usage, "total_token_count", None),

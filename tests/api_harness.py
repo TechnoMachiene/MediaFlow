@@ -91,3 +91,9 @@ def png(color=(1, 2, 3), size=(32, 24)) -> bytes:
 
 def upload(client, headers, content: bytes, name="cat.png", mime="image/png"):
     return client.post("/api/v1/jobs", headers=headers, files={"file": (name, content, mime)})
+
+
+def send_for_review(client, headers, job_id: str) -> None:
+    """The uploader (or an Admin) accepts the draft, putting it in the review queue."""
+    response = client.post(f"/api/v1/jobs/{job_id}/submit", headers=headers)
+    assert response.status_code == 200, response.text

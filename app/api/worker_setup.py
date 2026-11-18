@@ -5,11 +5,13 @@ Used by `python -m app.cli worker` and by the API's embedded worker (EMBEDDED_WO
 
 from __future__ import annotations
 
+from app.api.notifications import EmailOutbox, Mailer, publication_outcome
 from app.api.persistence import attach
 from app.api.reconcile import Reconciler
 from app.api.retention import prune_media
 from app.publishing.crypto import Cipher
 from app.publishing.delivery import Deliverer
+from app.publishing.media import MediaResolver
 from app.publishing.registry import build_providers
 from app.storage import MediaStorage
 from app.wiring import Runtime
@@ -17,6 +19,7 @@ from app.wiring import Runtime
 RECONCILE_EVERY_S = 30.0
 RETENTION_EVERY_S = 3600.0
 DELIVERY_EVERY_S = 10.0
+NOTIFY_EVERY_S = 15.0
 
 
 def configure_worker(
@@ -30,6 +33,8 @@ def configure_worker(
     retention_every_s: float = RETENTION_EVERY_S,
     publishing: tuple[tuple[str, ...], Cipher] | None = None,
     delivery_every_s: float = DELIVERY_EVERY_S,
+    publish_signer=None,  # MediaLinkSigner(jwt_secret, PUBLISHING), for Instagram's media URLs
+    notifications_every_s: float = NOTIFY_EVERY_S,
 ) -> Reconciler:
     attach(rt.worker, session_factory)
     rt.worker.materialize = storage.materialize
@@ -44,6 +49,14 @@ def configure_worker(
 
     if publishing is not None and publishing[0]:
         names, cipher = publishing
-        deliverer = Deliverer(session_factory, build_providers(names, session_factory), cipher)
+        deliverer = Deliverer(
+            session_factory, build_providers(names, session_factory), cipher,
+            media=MediaResolver(storage, publish_signer), notify=publication_outcome,
+        )
         rt.worker.every(delivery_every_s, deliverer.run_once)
+
+    mailer = Mailer.from_env()
+    if mailer is not None:
+        outbox = EmailOutbox(session_factory, mailer, cipher=publishing[1] if publishing else None)
+        rt.worker.every(notifications_every_s, outbox.run_once)
     return reconciler

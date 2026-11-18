@@ -121,6 +121,11 @@ class ProviderInfo:
     idempotent: bool
     # Provider-specific choices offered when connecting: {option: [allowed values]}.
     options: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Posts the job's photo or video (the delivery loop then passes `media` to `publish`).
+    needs_media: bool = False
+    # The account belongs to the whole installation (credentials in .env), so only a platform
+    # admin may connect it, never a workspace admin.
+    operator_only: bool = False
 
 
 class Provider(ABC):
@@ -133,7 +138,7 @@ class Provider(ABC):
 
     @abstractmethod
     def exchange_code(self, *, code: str, code_verifier: str, redirect_uri: str,
-                      options: dict) -> Grant:
+                      options: dict, channel: str) -> Grant:
         """Trade the authorization code for credentials. Raise AuthorizationDenied on refusal."""
 
     @abstractmethod
@@ -142,8 +147,10 @@ class Provider(ABC):
 
     @abstractmethod
     def publish(self, credentials: Credentials, payload: Payload, *,
-                account_id: str, options: dict) -> Receipt:
-        """Send the post. Must honour `payload.idempotency_key` if `info.idempotent`."""
+                account_id: str, options: dict, media=None) -> Receipt:
+        """Send the post. Must honour `payload.idempotency_key` if `info.idempotent`.
+        `media` (an `app.publishing.media.JobMedia`) is given when `info.needs_media`; None
+        then means the original is gone."""
 
     @abstractmethod
     def check(self, credentials: Credentials, external_id: str, *,

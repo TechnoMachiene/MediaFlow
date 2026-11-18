@@ -27,6 +27,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 COPY alembic.ini ./
 COPY migrations/ ./migrations/
 COPY app/ ./app/
+COPY prompts/ ./prompts/
 COPY --from=web /web/dist ./frontend/dist
 
 RUN useradd --system --uid 10001 --home-dir /app mediaflow \
@@ -37,4 +38,7 @@ USER mediaflow
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
     CMD python -c "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).status != 200)"
-CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+# Open live-update streams (app/api/live.py) don't hold up a restart: after 5 s they are cut,
+# and browsers reconnect to the new process on their own.
+CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", \
+     "--timeout-graceful-shutdown", "5"]

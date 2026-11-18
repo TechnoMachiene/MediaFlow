@@ -22,7 +22,7 @@ from app.publishing.base import ProviderInfo
 from app.publishing.crypto import Cipher
 from app.publishing.delivery import Deliverer
 from app.publishing.mock import MockProvider
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -91,8 +91,9 @@ def connect(w, behavior="succeed", channel="instagram", who="anna"):
 def scheduled_post(w, days=1) -> str:
     job_id = upload(w.client, w.h["alice"], png((days, 2, 3))).json()["job_id"]
     w.runtime.worker.drain()
+    send_for_review(w.client, w.h["alice"], job_id)
     w.client.patch(f"/api/v1/jobs/{job_id}/approval", headers=w.h["max"],
-                   json={"status": "approved"})
+                   json={"status": "approved", "checked": True})
     when = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
     post = w.client.post(f"/api/v1/jobs/{job_id}/schedule", headers=w.h["alice"],
                          json={"scheduled_at": when, "timezone": "UTC"})

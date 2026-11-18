@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 
+from app.api import live
 from app.api.analytics import router as analytics_router
 from app.api.audit_api import router as audit_router
 from app.api.config import ApiSettings
@@ -24,8 +25,9 @@ from app.api.database import (
 )
 from app.api.drafts import router as drafts_router
 from app.api.media_api import router as media_router
-from app.api.media_links import MediaLinkSigner
+from app.api.media_links import PUBLISHING, MediaLinkSigner
 from app.api.media_links import router as media_links_router
+from app.api.notifications import router as notifications_router
 from app.api.publishing import router as publishing_router
 from app.api.routes import router
 from app.api.throttle import Throttle
@@ -81,6 +83,7 @@ def create_app(
         app.state.storage = storage or cfg.build_storage()
         app.state.cipher = cfg.build_cipher()
         app.state.media_signer = MediaLinkSigner(cfg.jwt_secret)
+        app.state.publish_signer = MediaLinkSigner(cfg.jwt_secret, PUBLISHING)
         app.state.throttle = Throttle(  # no Redis (API-only unit tests): fails open
             getattr(rt, "r", None), getattr(getattr(rt, "settings", None), "prefix", "ma"),
             max_failures=cfg.login_max_failures,
@@ -88,6 +91,11 @@ def create_app(
             signup_ip_max=cfg.signup_ip_max,
         )
         app.state.providers = build_providers(cfg.publishing_providers, db_sessions)
+        # Live updates (app/api/live.py): publish committed changes, stream them to browsers.
+        app.state.live_redis = None
+        if getattr(rt, "r", None) is not None:
+            live.configure(rt.r, rt.settings.prefix)
+            app.state.live_redis = live.async_client(rt.settings.redis_url)
         app.state.owns_runtime = runtime is None
         app.state.owns_engine = engine is None
 
@@ -97,6 +105,7 @@ def create_app(
                 rt, db_sessions, app.state.storage, retention_days=cfg.media_retention_days,
                 retention_max_days=cfg.media_retention_max_days,
                 publishing=(cfg.publishing_providers, app.state.cipher),
+                publish_signer=app.state.publish_signer,
             )
             worker_thread = threading.Thread(
                 target=rt.worker.run, args=(stop,), name="embedded-worker", daemon=True
@@ -107,6 +116,8 @@ def create_app(
             yield
         finally:
             stop.set()
+            if app.state.live_redis is not None:
+                await app.state.live_redis.aclose()
             if worker_thread is not None:
                 worker_thread.join(timeout=10)
             if app.state.owns_runtime:
@@ -130,6 +141,8 @@ def create_app(
     application.include_router(publishing_router)
     application.include_router(media_router)
     application.include_router(media_links_router)
+    application.include_router(notifications_router)
+    application.include_router(live.router)
     # Order matters: tracing is added last so it is outermost, and the access log written by
     # ObservabilityMiddleware happens inside the request span (and so carries its trace_id).
     application.add_middleware(ObservabilityMiddleware)

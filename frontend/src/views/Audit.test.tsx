@@ -36,6 +36,14 @@ suite('describe', () => {
     expect(describe(event({
       action: 'member.removed', before: { role: 'user' }, after: { jobs_deleted: 3 },
     }))).toBe('anna@example.com removed alice@example.com (Member) and 3 of their jobs');
+    expect(describe(event({
+      action: 'draft.submitted', target_label: 'cat.png',
+      before: { approval_status: 'with_uploader' }, after: { approval_status: 'pending', version: 2 },
+    }))).toBe('anna@example.com sent version 2 of cat.png for review');
+    expect(describe(event({
+      action: 'draft.edited', target_label: 'cat.png',
+      before: { approval_status: 'rejected' }, after: { approval_status: 'with_uploader', version: 3 },
+    }))).toBe('anna@example.com saved version 3 of cat.png, taking it back to the uploader');
     expect(describe(event({ action: 'member.password_reset', actor_email: 'system:cli', actor_id: null })))
       .toBe('The admin command reset the password of alice@example.com');
   });

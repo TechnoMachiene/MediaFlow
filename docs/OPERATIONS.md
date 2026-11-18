@@ -247,3 +247,21 @@ goes on SQL (look for many `SELECT postgresql` spans, an N+1) or Redis.
 | Reload alert rules after editing | `curl -X POST localhost:9090/-/reload` |
 | Test alert rules | `docker run --rm --entrypoint promtool -v "$PWD/ops/prometheus:/p" -w /p prom/prometheus:v3.7.0 test rules alerts_test.yml` |
 | Change the dashboard | edit `ops/grafana/generate_dashboard.py`, run it with `ops/grafana/dashboards/mediaflow.json` as the argument, restart Grafana |
+
+## Live updates
+
+Browsers keep one `GET /api/v1/events` stream open per tab (Server-Sent Events,
+`app/api/live.py`). Committed changes publish topic names (never content) on Redis pub/sub
+channels `<QUEUE_PREFIX>:live:ws:<workspace>` and `<QUEUE_PREFIX>:live:user:<user>`; the API and
+the worker both publish.
+
+- **Screens stop updating by themselves:** the stream is being buffered or cut by something in
+  front of the API. The nginx overlay turns buffering off for `/api/v1/events`; another proxy or
+  load balancer needs the same, and an idle timeout above 20 seconds (the heartbeat). Browsers
+  still refresh when a tab regains focus, and the bell still checks every 30 seconds.
+- **Redis down:** saves still succeed (publishing is best effort); live updates resume when it
+  is back, and each browser refreshes everything when it reconnects.
+- Each stream ends after 10 minutes and the browser reconnects, re-checking the session, so a
+  removed member stops hearing within that time. A restart cuts streams after 5 seconds
+  (`--timeout-graceful-shutdown`); browsers reconnect on their own.
+- Watch: `redis-cli PUBSUB NUMSUB <prefix>:live:ws:<workspace>` shows how many tabs listen.

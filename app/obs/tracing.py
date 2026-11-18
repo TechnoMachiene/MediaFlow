@@ -110,7 +110,9 @@ def instrument_app(app) -> None:
     # Health probes and scrapes would drown real traffic in the trace store. Signed media links
     # carry their token in the path, which must never reach the trace store either.
     FastAPIInstrumentor.instrument_app(
-        app, excluded_urls="health/live,health/ready,api/v1/media/"
+        app,
+        excluded_urls=("health/live,health/ready,api/v1/media/,api/v1/publish-media/,"
+                       "api/v1/events"),  # the live stream: one long span per open tab
     )
 
 

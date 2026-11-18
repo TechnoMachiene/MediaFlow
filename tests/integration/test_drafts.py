@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.api.database import ApiJob, AuditEvent, DraftComment, DraftVersion
 from app.api.persistence import persist_api_result
-from tests.api_harness import add_member, build_app, login, png, upload
+from tests.api_harness import add_member, build_app, login, png, send_for_review, upload
 from tests.helpers import ScriptedClient
 
 pytestmark = pytest.mark.integration
@@ -139,27 +139,108 @@ def test_restoring_an_older_version_adds_a_new_one(team):
     assert save(client, h["alice"], job_id, 3, restore=9).status_code == 404
 
 
-@pytest.mark.parametrize("decision", ["approved", "rejected"])
-def test_editing_a_decided_draft_sends_it_back_for_review(team, decision):
+# ── Sending for review ───────────────────────────────────────────────────────────────────
+
+def review_queue(client, h):
+    queue = client.get("/api/v1/jobs/review", headers=h["max"]).json()["items"]
+    return [j["job_id"] for j in queue]
+
+
+def test_a_new_draft_waits_for_its_uploader_before_review(team):
     client, sessions, runtime, h, _ = team
     job_id = drafted(client, runtime, h["alice"])
-    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"], json={"status": decision})
+    assert job(client, h["alice"], job_id)["approval_status"] == "with_uploader"
+    assert review_queue(client, h) == []
+    early = client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
+                         json={"status": "approved", "checked": True})
+    assert early.status_code == 409 and "uploader" in early.json()["detail"]
+
+    # The uploader may rewrite it by hand first; it stays theirs until they send it.
+    saved = save(client, h["alice"], job_id, 1, edited("Hand-written"))
+    assert saved.json()["approval_status"] == "with_uploader"
+    assert saved.json()["returned_to_review"] is False
+    assert review_queue(client, h) == []
+
+    sent = client.post(f"/api/v1/jobs/{job_id}/submit", headers=h["alice"])
+    assert sent.status_code == 200 and sent.json()["approval_status"] == "pending"
+    assert review_queue(client, h) == [job_id]
+    again = client.post(f"/api/v1/jobs/{job_id}/submit", headers=h["alice"])
+    assert again.status_code == 409
+
+    with sessions() as db:
+        event = db.scalars(select(AuditEvent).where(AuditEvent.action == "draft.submitted")).one()
+    assert (event.target_id, event.before, event.after) == (
+        job_id, {"approval_status": "with_uploader"}, {"approval_status": "pending", "version": 2}
+    )
+
+
+def test_only_the_uploader_or_an_admin_sends_a_draft_for_review(team):
+    client, sessions, runtime, h, _ = team
+    add_member(sessions, "anna@a.example.com", "admin", "ws-a")
+    anna = login(client, "anna@a.example.com")
+    job_id = drafted(client, runtime, h["alice"])
+    assert client.post(f"/api/v1/jobs/{job_id}/submit", headers=h["ada"]).status_code == 404
+    assert client.post(f"/api/v1/jobs/{job_id}/submit", headers=h["max"]).status_code == 404
+    assert client.post(f"/api/v1/jobs/{job_id}/submit", headers=anna).status_code == 200
+
+
+def test_a_draft_still_being_written_cannot_be_sent(team):
+    client, sessions, runtime, h, _ = team
+    job_id = upload(client, h["alice"], png()).json()["job_id"]  # not drained yet
+    response = client.post(f"/api/v1/jobs/{job_id}/submit", headers=h["alice"])
+    assert response.status_code == 409 and "no draft" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+def test_the_uploader_editing_a_decided_draft_takes_it_back(team, decision):
+    client, sessions, runtime, h, _ = team
+    job_id = drafted(client, runtime, h["alice"])
+    send_for_review(client, h["alice"], job_id)
+    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
+                 json={"status": decision, "checked": True})
     saved = save(client, h["alice"], job_id, 1, edited("Revised"))
-    assert saved.json()["approval_status"] == "pending"
-    assert saved.json()["returned_to_review"] is True
-    waiting = client.get("/api/v1/jobs/review", headers=h["max"]).json()["items"]
-    assert [j["job_id"] for j in waiting] == [job_id]
+    assert saved.json()["approval_status"] == "with_uploader"
+    assert saved.json()["returned_to_review"] is False
+    assert review_queue(client, h) == []
 
     with sessions() as db:
         event = db.scalars(select(AuditEvent).where(AuditEvent.action == "draft.edited")).one()
     assert event.before == {"version": 1, "approval_status": decision}
-    assert event.after == {"version": 2, "approval_status": "pending"}
+    assert event.after == {"version": 2, "approval_status": "with_uploader"}
+
+    send_for_review(client, h["alice"], job_id)
+    assert review_queue(client, h) == [job_id]
+
+
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+def test_a_reviewer_editing_a_decided_draft_sends_it_back_for_review(team, decision):
+    client, sessions, runtime, h, _ = team
+    job_id = drafted(client, runtime, h["alice"])
+    send_for_review(client, h["alice"], job_id)
+    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
+                 json={"status": decision, "checked": True})
+    saved = save(client, h["max"], job_id, 1, edited("Tightened by the manager"))
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["approval_status"] == "pending"
+    assert saved.json()["returned_to_review"] is True
+    assert review_queue(client, h) == [job_id]
+
+
+def test_a_reviewer_editing_an_unsent_draft_leaves_it_with_the_uploader(team):
+    client, sessions, runtime, h, _ = team
+    job_id = drafted(client, runtime, h["alice"])
+    saved = save(client, h["max"], job_id, 1, edited("Suggested by the manager"))
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["approval_status"] == "with_uploader"
+    assert review_queue(client, h) == []
 
 
 def test_a_draft_on_the_calendar_is_locked(team):
     client, sessions, runtime, h, _ = team
     job_id = drafted(client, runtime, h["alice"])
-    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"], json={"status": "approved"})
+    send_for_review(client, h["alice"], job_id)
+    client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
+                 json={"status": "approved", "checked": True})
     when = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     post = client.post(f"/api/v1/jobs/{job_id}/schedule", headers=h["alice"],
                        json={"scheduled_at": when, "timezone": "UTC"}).json()
@@ -290,6 +371,7 @@ def test_empty_or_huge_comments_are_refused(team, body):
 def test_a_rejection_reason_lands_in_the_thread(team):
     client, sessions, runtime, h, _ = team
     job_id = drafted(client, runtime, h["alice"])
+    send_for_review(client, h["alice"], job_id)
     client.patch(f"/api/v1/jobs/{job_id}/approval", headers=h["max"],
                  json={"status": "rejected", "comment": "Wrong product name in the caption"})
     [note] = client.get(f"/api/v1/jobs/{job_id}/comments", headers=h["alice"]).json()
@@ -297,7 +379,9 @@ def test_a_rejection_reason_lands_in_the_thread(team):
         "rejected", "Wrong product name in the caption", "max@a.example.com"
     )
     other = drafted(client, runtime, h["alice"], color=(4, 4, 4))
-    client.patch(f"/api/v1/jobs/{other}/approval", headers=h["max"], json={"status": "approved"})
+    send_for_review(client, h["alice"], other)
+    client.patch(f"/api/v1/jobs/{other}/approval", headers=h["max"],
+                 json={"status": "approved", "checked": True})
     assert client.get(f"/api/v1/jobs/{other}/comments", headers=h["alice"]).json() == []
 
 
