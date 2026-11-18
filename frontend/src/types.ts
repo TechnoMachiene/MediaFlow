@@ -299,7 +299,12 @@ export interface Post {
   local_date: string;
   content: string;
   created_at: string;
+  /** Posted or planned (server: routes.py `_delivery`). */
+  delivery?: Delivery;
+  published_url?: string | null;
 }
+
+export type Delivery = 'upcoming' | 'sending' | 'published' | 'failed' | 'past' | 'cancelled';
 
 export interface CalendarData {
   timezone: string;

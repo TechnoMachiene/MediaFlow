@@ -1052,9 +1052,43 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+IN_FLIGHT_DELIVERY = ("queued", "retrying", "publishing", "processing")
+
+
+def _deliveries(db: Session, post_ids: list[str]) -> dict[str, list[tuple[str, str | None]]]:
+    """(status, external_url) of each post's publications, in one query."""
+    out: dict[str, list[tuple[str, str | None]]] = {pid: [] for pid in post_ids}
+    if post_ids:
+        rows = db.execute(select(Publication.scheduled_post_id, Publication.status,
+                                 Publication.external_url)
+                          .where(Publication.scheduled_post_id.in_(post_ids))).all()
+        for pid, state, url in rows:
+            out[pid].append((state, url))
+    return out
+
+
+def _delivery(post: ScheduledPost, deliveries: list[tuple[str, str | None]],
+              now: datetime) -> tuple[str, str | None]:
+    if post.status == "cancelled":
+        return "cancelled", None
+    published = [url for state, url in deliveries if state == "published"]
+    if published:
+        return "published", next((u for u in published if u), None)
+    due = _as_utc(post.scheduled_at) <= now
+    if any(state in IN_FLIGHT_DELIVERY for state, _ in deliveries):
+        return ("sending" if due else "upcoming"), None
+    if any(state in ("failed", "unknown") for state, _ in deliveries):
+        return "failed", None
+    return ("past" if due else "upcoming"), None
+
+
 def _scheduled_post_view(
-    db: Session, post: ScheduledPost, timezone_name: str
+    db: Session, post: ScheduledPost, timezone_name: str,
+    deliveries: list[tuple[str, str | None]] | None = None,
 ) -> ScheduledPostView:
+    if deliveries is None:
+        deliveries = _deliveries(db, [post.id])[post.id]
+    delivery, published_url = _delivery(post, deliveries, datetime.now(timezone.utc))
     job = db.get(ApiJob, post.job_id)
     if job is None or job.result is None:
         raise HTTPException(
@@ -1073,6 +1107,8 @@ def _scheduled_post_view(
         local_date=scheduled_at.astimezone(ZoneInfo(timezone_name)).date(),
         content=str(job.result["text"]),
         created_at=_as_utc(post.created_at),
+        delivery=delivery,
+        published_url=published_url,
     )
 
 
@@ -1122,7 +1158,8 @@ def _list_scheduled_posts(
         .limit(limit)
         .offset(offset)
     ).all()
-    return [_scheduled_post_view(db, post, timezone_name) for post in posts]
+    deliveries = _deliveries(db, [post.id for post in posts])
+    return [_scheduled_post_view(db, post, timezone_name, deliveries[post.id]) for post in posts]
 
 
 def _workspace_post(db: Session, actor: Member, post_id: str) -> ScheduledPost:

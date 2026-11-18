@@ -593,6 +593,17 @@ class ScheduledPostView(BaseModel):
     local_date: date
     content: str
     created_at: datetime
+    # Where the post stands, for telling posted from planned at a glance:
+    #   upcoming   its time hasn't come (auto-publishing may be set up)
+    #   sending    its time came and a delivery is under way
+    #   published  a connected account has it (`published_url` links to it)
+    #   failed     every delivery failed or needs checking
+    #   past       its time passed with no automatic delivery (posted by hand, if at all)
+    #   cancelled  taken off the calendar
+    delivery: Literal[
+        "upcoming", "sending", "published", "failed", "past", "cancelled"
+    ] = "upcoming"
+    published_url: str | None = None
 
 
 class ScheduledPostPage(BaseModel):

@@ -17,6 +17,7 @@ from app.api.database import (
     PublishingConnection,
     SandboxPost,
     SandboxRequest,
+    ScheduledPost,
 )
 from app.publishing.base import ProviderInfo
 from app.publishing.crypto import Cipher
@@ -535,3 +536,53 @@ def test_the_worker_derives_the_same_key_as_the_api(world, monkeypatch):
     assert names == ("mock",) and cipher.open_credentials(sealed).access_token
     monkeypatch.setenv("PUBLISHING_PROVIDERS", "none")
     assert _publishing() is None
+
+
+def test_the_calendar_tells_posted_from_planned(world):
+    w = world
+
+    def delivery(post_id):
+        got = w.client.get(f"/api/v1/scheduled-posts/{post_id}", headers=w.h["alice"]).json()
+        return got["delivery"], got["published_url"]
+
+    def back_date(post_id, days=1):
+        with w.sessions.begin() as db:
+            db.execute(update(ScheduledPost).where(ScheduledPost.id == post_id).values(
+                scheduled_at=datetime.now(timezone.utc) - timedelta(days=days)))
+
+    planned = scheduled_post(w, days=1)
+    assert delivery(planned) == ("upcoming", None)
+    back_date(planned)
+    assert delivery(planned) == ("past", None)  # time passed, no automatic delivery
+
+    ok = connect(w, "succeed")
+    live = scheduled_post(w, days=2)
+    pub = w.client.post(f"/api/v1/scheduled-posts/{live}/publications", headers=w.h["alice"],
+                        json={"connection_id": ok["id"]}).json()
+    assert delivery(live) == ("upcoming", None)  # auto-publishing set, not due yet
+    back_date(live)
+    assert delivery(live) == ("sending", None)
+    w.clock.advance(days=3)
+    w.deliverer.run_once()
+    state, url = delivery(live)
+    assert state == "published" and url
+
+    bad = connect(w, "reject")
+    refused = scheduled_post(w, days=3)
+    w.client.post(f"/api/v1/scheduled-posts/{refused}/publications", headers=w.h["alice"],
+                  json={"connection_id": bad["id"]})
+    w.clock.advance(days=5)
+    w.deliverer.run_once()
+    assert delivery(refused) == ("failed", None)
+
+    w.client.delete(f"/api/v1/scheduled-posts/{planned}", headers=w.h["alice"])
+    assert delivery(planned) == ("cancelled", None)
+
+    # The month view carries the same, in one go.
+    day = datetime.now(timezone.utc).date()
+    month = w.client.get("/api/v1/calendar", headers=w.h["alice"], params={
+        "start": str(day - timedelta(days=2)), "end": str(day + timedelta(days=4)),
+        "timezone": "UTC"}).json()
+    states = {p["id"]: p["delivery"] for d in month["days"] for p in d["posts"]}
+    assert states[live] == "published" and states[refused] == "failed"
+    assert pub["id"]

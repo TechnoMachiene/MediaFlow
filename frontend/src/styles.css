@@ -1998,3 +1998,48 @@ button.tile:active {
   display: grid;
   gap: 0.25rem;
 }
+
+/* ── Calendar: posted vs planned ─────────────────────────────────────────── */
+
+.cal-dot.published { background: var(--green); }
+.cal-dot.failed { background: var(--red); }
+.cal-dot.past { background: var(--text-3); }
+@media (min-width: 52rem) {
+  .cal-chip.published {
+    color: var(--green);
+    background: color-mix(in srgb, var(--green) 13%, transparent);
+  }
+  .cal-chip.failed {
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 11%, transparent);
+  }
+  /* Its time passed without an automatic post: kept readable, but clearly in the past. */
+  .cal-chip.past {
+    color: var(--text-2);
+    background: var(--fill);
+  }
+}
+.cal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+  color: var(--text-2);
+}
+.cal-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+.cal-swatch {
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 0.1875rem;
+  background: var(--accent);
+}
+.cal-swatch.published { background: var(--green); }
+.cal-swatch.failed { background: var(--red); }
+.cal-swatch.past { background: var(--text-3); }

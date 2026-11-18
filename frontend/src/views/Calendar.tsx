@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLive } from '../live';
 import { ApiError, api } from '../api';
 import {
-  addMonths, fmt, headline, localTz, monthGrid, timezones, todayIn, tzLabel,
+  DELIVERY, addMonths, fmt, headline, localTz, monthGrid, timezones, todayIn, tzLabel,
 } from '../lib';
 import { Sheet } from '../Sheet';
 import { useToast } from '../toast';
-import type { CalendarData, Post } from '../types';
+import type { CalendarData, Delivery, Post } from '../types';
 import {
   Badge, Button, ConfirmButton, ErrorNote, Icon, PageHeader, Thumb, useLast,
 } from '../ui';
@@ -14,6 +14,22 @@ import { ContentView, ScheduleForm } from './JobSheet';
 import { PostPublishing } from './Publishing';
 
 const TZ_KEY = 'mediaflow.tz';
+
+/** Posted or planned. Older servers don't send it: fall back on the time. */
+function deliveryOf(p: Post): Delivery {
+  if (p.delivery) return p.delivery;
+  if (p.status === 'cancelled') return 'cancelled';
+  return new Date(p.scheduled_at) < new Date() ? 'past' : 'upcoming';
+}
+
+/** The day's dot on phones: what still needs attention wins, then what's coming. */
+function dayDelivery(posts: Post[]): Delivery {
+  const states = posts.map(deliveryOf);
+  for (const d of ['failed', 'sending', 'upcoming', 'published', 'past'] as const) {
+    if (states.includes(d)) return d;
+  }
+  return 'cancelled';
+}
 function savedTz(): string {
   try {
     const tz = localStorage.getItem(TZ_KEY);
@@ -126,20 +142,29 @@ export function Calendar() {
                   <span className="cal-num">{Number(day.slice(8))}</span>
                   <span className="cal-chips">
                     {posts.slice(0, 2).map((p) => (
-                      <span key={p.id} className={`cal-chip ${p.status === 'cancelled' ? 'cancelled' : ''}`}>
+                      <span key={p.id} className={`cal-chip ${deliveryOf(p)}`}
+                        title={DELIVERY[deliveryOf(p)].label}>
+                        {deliveryOf(p) === 'published' && <span aria-hidden="true">✓ </span>}
+                        {deliveryOf(p) === 'failed' && <span aria-hidden="true">! </span>}
                         <b>{fmt.time(p.scheduled_at, tz)}</b> {headline(p.content, p.original_filename)}
                       </span>
                     ))}
                     {posts.length > 2 && <span className="cal-more">{posts.length - 2} more</span>}
                   </span>
                   {posts.length > 0 && (
-                    <span className={`cal-dot ${live.length ? '' : 'cancelled'}`} aria-hidden="true" />
+                    <span className={`cal-dot ${dayDelivery(posts)}`} aria-hidden="true" />
                   )}
                 </button>
               );
             })}
           </div>
         </div>
+
+        <ul className="cal-legend" aria-label="Key">
+          {(['upcoming', 'published', 'failed', 'past'] as const).map((d) => (
+            <li key={d}><span className={`cal-swatch ${d}`} aria-hidden="true" />{DELIVERY[d].label}</li>
+          ))}
+        </ul>
 
         <section className="agenda" aria-live="polite">
           <h3>{fmt.day(selected)}</h3>
@@ -161,7 +186,7 @@ export function Calendar() {
                     </span>
                     <span className="row-side">
                       <time dateTime={post.scheduled_at}>{fmt.time(post.scheduled_at, tz)}</time>
-                      {post.status === 'cancelled' && <Badge tone="neutral">Cancelled</Badge>}
+                      <Badge tone={DELIVERY[deliveryOf(post)].tone}>{DELIVERY[deliveryOf(post)].label}</Badge>
                     </span>
                   </button>
                 </li>
@@ -223,8 +248,16 @@ function PostDetail({
               ` · ${fmt.dateTime(post.scheduled_at, post.timezone)} in ${tzLabel(post.timezone)}`}
           </span>
         </div>
-        {cancelled && <Badge tone="neutral">Cancelled</Badge>}
+        <Badge tone={DELIVERY[deliveryOf(post)].tone}>{DELIVERY[deliveryOf(post)].label}</Badge>
       </div>
+      {deliveryOf(post) !== 'upcoming' && !cancelled && (
+        <p className={`callout ${deliveryOf(post) === 'failed' ? 'callout-red' : ''}`}>
+          {DELIVERY[deliveryOf(post)].note}
+          {post.published_url && (
+            <> <a href={post.published_url} target="_blank" rel="noreferrer noopener">View the post</a></>
+          )}
+        </p>
+      )}
 
       {editing ? (
         <div className="panel">

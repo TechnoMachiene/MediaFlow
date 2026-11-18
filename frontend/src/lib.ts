@@ -1,4 +1,4 @@
-import type { Job, Role } from './types';
+import type { Delivery, Job, Role } from './types';
 
 /* ── Motion ──────────────────────────────────────────────────────────────── */
 
@@ -312,3 +312,17 @@ export const fmt = {
 };
 
 export const tzLabel = (tz: string) => tz.replace(/_/g, ' ');
+
+/* ── Calendar: posted vs planned ─────────────────────────────────────────── */
+
+export const DELIVERY: Record<Delivery, { label: string; tone: Tone; note: string }> = {
+  upcoming: { label: 'Planned', tone: 'blue', note: 'Not posted yet.' },
+  sending: { label: 'Posting', tone: 'blue', note: 'Its time has come and it is being published now.' },
+  published: { label: 'Posted', tone: 'green', note: 'Published to a connected account.' },
+  failed: { label: "Didn't post", tone: 'red', note: "Publishing failed. Open it to see why, then retry or post it by hand." },
+  past: {
+    label: 'Time passed', tone: 'neutral',
+    note: "Its time has passed and MediaFlow didn't publish it (no account was set to post it). Check whether someone posted it by hand.",
+  },
+  cancelled: { label: 'Cancelled', tone: 'neutral', note: 'Taken off the calendar.' },
+};
