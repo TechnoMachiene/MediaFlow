@@ -519,7 +519,7 @@ The full model, role matrix and invitation security properties are in
 
 | Method and path | Access | Purpose |
 |---|---|---|
-| `POST /jobs` | Authenticated | Upload an image/video as multipart field `file` and enqueue analysis. Send an `Idempotency-Key` header (e.g. a UUID) to make retries safe: the same key and file return the original job. |
+| `POST /jobs` | Authenticated | Upload an image/video as multipart field `file` and enqueue analysis; answers `202` at once. Send `Prefer: wait=N` to wait up to N seconds (at most 300) for the draft (`200` with it if ready). Send an `Idempotency-Key` header (e.g. a UUID) to make retries safe: the same key and file return the original job. |
 | `GET /jobs/mine` | Authenticated | List the caller's jobs with processing and approval statuses; supports `limit` and `offset`. |
 | `GET /jobs/{job_id}` | Owner/manager/admin | Get a job's current status and result; non-admins can access their own jobs. |
 | `DELETE /jobs/{job_id}` | Owner/manager/admin | Cancel an owned job when it has not started processing. |
@@ -651,6 +651,9 @@ See [.env.example](./.env.example). Common settings:
 | `META_INSTAGRAM_ACCOUNT_ID` | The Instagram business account linked to the Page (Instagram posting). |
 | `META_APP_SECRET`, `META_GRAPH_VERSION` | Optional: adds `appsecret_proof` to every call; Graph API version (default `v24.0`). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Email copies of notifications, sent by the worker. Empty `SMTP_HOST`: in-app only. `SMTP_SECURITY` is `starttls` (587, default), `ssl` (465) or `none`. |
+| `API_THREADS`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT` | Capacity per API process (defaults 40, 20, 20, 10 s). See [docs/OPERATIONS.md](docs/OPERATIONS.md#capacity). |
+| `PASSWORD_HASH_CONCURRENCY`, `PASSWORD_HASH_WAIT_S` | Password checks at once (default: the CPUs the container may use) and how long a sign-in waits its turn before a 503 "busy" (default 30 s). |
+| `API_REPLICAS`, `POSTGRES_MAX_CONNECTIONS` | API containers behind the HTTPS proxy (default 2), and PostgreSQL's connection limit (default 200). |
 | `FLAGGED_PHRASES_FILE` | Phrases a reviewer is warned about before approving (default `prompts/flagged_phrases.txt`). |
 | `LOGIN_MAX_FAILURES`, `LOGIN_IP_MAX_FAILURES`, `LOGIN_WINDOW_S`, `SIGNUP_IP_MAX` | Sign-in and signup throttling: defaults 10 per account and 50 per address in 15 minutes; 10 signups an hour per address. |
 | `FORWARDED_ALLOW_IPS` | Proxies whose `X-Forwarded-For` uvicorn trusts; `compose.proxy.yaml` sets it. |
@@ -731,6 +734,7 @@ clean up tests.
 | `prompts/flagged_phrases.txt`, `app/draft_checks.py` | What a reviewer must verify before approving. |
 | `app/publishing/meta.py`, `app/publishing/media.py` | Facebook Page and Instagram publishing (Graph API), and the media they post. |
 | `app/api/notifications.py` | In-app notifications, their email copies (outbox) and the API. |
+| `scripts/load_test.py` | Burst benchmark (100 at once) against a demo stack. |
 | `app/api/live.py`, `frontend/src/live.ts` | Live updates: changes announced on Redis, streamed to browsers. |
 | `migrations/` | Alembic schema history. |
 | `docs/JOB_LIFECYCLE.md` | Cross-store job lifecycle, failure matrix, guarantees. |

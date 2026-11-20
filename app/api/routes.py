@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -87,7 +89,11 @@ from app.api.schemas import (
     WorkspaceCreate,
     WorkspaceView,
 )
-from app.api.security import create_versioned_access_token, hash_password, verify_password
+from app.api.security import (
+    create_versioned_access_token,
+    hash_password,
+    verify_password_async,
+)
 from app.api.throttle import client_ip
 from app.errors import MediaError
 from app.media import ALLOWED, inspect_media
@@ -374,19 +380,28 @@ def read_meta(request: Request):
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-def login(payload: Credentials, request: Request, db: DbSession):
-    throttle, ip = request.app.state.throttle, client_ip(request)
-    # Checked before the password, so a blocked attempt reveals nothing about it.
-    throttle.check_login(ip, str(payload.email))
-    user = db.scalar(select(User).where(User.email == str(payload.email)))
-    if user is None or not verify_password(payload.password, user.password_hash):
-        throttle.login_failed(ip, str(payload.email))
+async def login(payload: Credentials, request: Request):
+    """Async on purpose: a sign-in spends most of its time waiting its turn for the
+    deliberately slow password check (app/api/security.py), and waiting here holds neither a
+    request thread nor a database connection. The quick steps run on worker threads."""
+    throttle, ip, email = request.app.state.throttle, client_ip(request), str(payload.email)
+
+    def find_user() -> User | None:
+        # Checked before the password, so a blocked attempt reveals nothing about it.
+        throttle.check_login(ip, email)
+        with request.app.state.session_factory() as db:
+            return db.scalar(select(User).where(User.email == email))  # stays readable
+
+    user = await run_in_threadpool(find_user)
+    known = user.password_hash if user is not None else None
+    if not await verify_password_async(payload.password, known) or user is None:
+        await run_in_threadpool(throttle.login_failed, ip, email)
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    throttle.login_succeeded(ip, str(payload.email))
+    await run_in_threadpool(throttle.login_succeeded, ip, email)
     return _token(request, user)
 
 
@@ -525,7 +540,7 @@ def _workspace_job(db: Session, actor: Member, job_id: str, *, any_owner: bool) 
     responses={
         status.HTTP_200_OK: {
             "model": JobResponse,
-            "description": "Job completed during the response wait",
+            "description": "Job completed while the request waited (only with `Prefer: wait=N`)",
         },
         status.HTTP_502_BAD_GATEWAY: {
             "model": JobResponse,
@@ -554,7 +569,22 @@ def upload_job(
             ),
         ),
     ] = None,
+    prefer: Annotated[
+        str | None,
+        Header(
+            alias="Prefer",
+            description=(
+                "`wait=N` (RFC 7240): hold the response up to N seconds (at most 300) for the "
+                "draft, answering 200 with it if it's ready. Without it the API answers 202 at "
+                "once and the client polls `GET /jobs/{id}` or listens to `/events`."
+            ),
+        ),
+    ] = None,
 ):
+    # The auth checks used the database; give the connection back while the file is copied,
+    # hashed and inspected, which can take a while for a large video.
+    db.commit()
+    wait_s = _preferred_wait(prefer)
     original_name = (file.filename or "upload").replace("\\", "/").rsplit("/", 1)[-1]
     suffix = Path(original_name).suffix.lower()
     media = ALLOWED.get(suffix)
@@ -596,7 +626,9 @@ def upload_job(
         if idempotency_key is not None:
             existing = _keyed_job(db, user, idempotency_key)
             if existing is not None:
-                return _replay(existing, sha256, filename, response, db, runtime, storage)
+                return _replay(existing, sha256, filename, response, db, runtime, storage,
+                               wait_s)
+            db.commit()  # release the connection during the inspection below
 
         inspect_media(
             str(staged_path),
@@ -629,7 +661,7 @@ def upload_job(
             existing = _keyed_job(db, user, idempotency_key) if idempotency_key else None
             if existing is None:
                 raise
-            return _replay(existing, sha256, filename, response, db, runtime, storage)
+            return _replay(existing, sha256, filename, response, db, runtime, storage, wait_s)
 
         # Step 2 (dispatch): hand it to Redis and record enqueued_at. Atomic and idempotent
         # per job id, so a retry (ours, a replay's or the reconciler's) never double-enqueues.
@@ -652,7 +684,7 @@ def upload_job(
             "job accepted",
             extra={"job_id": job_id, "dispatch": result["status"], "kind": kind, "bytes": size},
         )
-        return _respond(row, _await_result(runtime, job_id), response, db,
+        return _respond(row, _await_result(runtime, job_id, wait_s), response, db,
                         cached=result["cached"])
     except MediaError as exc:
         db.rollback()
@@ -677,7 +709,8 @@ def _keyed_job(db: Session, user: Member, key: str) -> ApiJob | None:
 
 
 def _replay(
-    row: ApiJob, sha256: str, filename: str, response: Response, db: Session, runtime, storage
+    row: ApiJob, sha256: str, filename: str, response: Response, db: Session, runtime, storage,
+    wait_s: float = 0.0,
 ) -> JobResponse:
     """Answer a retried upload with the job its first attempt created."""
     if (row.media_sha256, row.filename) != (sha256, filename):
@@ -700,14 +733,28 @@ def _replay(
                         exc_info=True, extra={"job_id": row.id})
             response.status_code = status.HTTP_202_ACCEPTED
             return JobResponse(job_id=row.id, status=row.status, error=row.error)
-    return _respond(row, _await_result(runtime, row.id), response, db)
+    return _respond(row, _await_result(runtime, row.id, wait_s), response, db)
 
 
-def _await_result(runtime, job_id: str) -> dict:
-    """Wait briefly for the result, but only while some worker is consuming the queue: with
-    none alive, holding the request open for minutes helps nobody. The job stays safely queued
-    either way, and the client gets 202 to poll. A Redis error ends the wait early."""
-    deadline = time.monotonic() + JOB_RESULT_WAIT_S
+_PREFER_WAIT = re.compile(r"(?:^|[;,\s])wait\s*=\s*(\d+)", re.IGNORECASE)
+
+
+def _preferred_wait(prefer: str | None) -> float:
+    """Seconds the client asked to wait for the draft (`Prefer: wait=N`), capped. None: 0.
+
+    Waiting was the default once. It held one of the API's request threads per upload for up
+    to five minutes, so a burst of uploads starved every other request (docs/OPERATIONS.md,
+    "Capacity"). The web app never needed it: it shows the job as analyzing and hears when
+    the draft is ready through live updates."""
+    match = _PREFER_WAIT.search(prefer or "")
+    return min(float(match.group(1)), float(JOB_RESULT_WAIT_S)) if match else 0.0
+
+
+def _await_result(runtime, job_id: str, wait_s: float = 0.0) -> dict:
+    """Wait up to `wait_s` for the result, but only while some worker is consuming the queue:
+    with none alive, holding the request open helps nobody. The job stays safely queued either
+    way, and the client gets 202 to poll. A Redis error ends the wait early."""
+    deadline = time.monotonic() + min(wait_s, JOB_RESULT_WAIT_S)
     next_liveness_check = time.monotonic() + WORKER_GRACE_S
     try:
         job_status = runtime.store.status(job_id)

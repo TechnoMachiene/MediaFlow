@@ -55,6 +55,12 @@ x-app: &app
     SMTP_PASSWORD: ${SMTP_PASSWORD:-}
     SMTP_FROM: ${SMTP_FROM:-}
     FLAGGED_PHRASES_FILE: ${FLAGGED_PHRASES_FILE:-}
+    # Capacity per process (docs/OPERATIONS.md, "Capacity")
+    DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+    DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+    DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
+    API_THREADS: ${API_THREADS:-40}
+    PASSWORD_HASH_CONCURRENCY: ${PASSWORD_HASH_CONCURRENCY:-}
     EMBEDDED_WORKER: "0"
     DEMO_MODE: "0"              # the demo has its own file: compose.demo.yaml
     LOG_FORMAT: ${LOG_FORMAT:-json}
@@ -77,6 +83,9 @@ services:
       POSTGRES_USER: mediaflow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 24)}
       POSTGRES_DB: mediaflow
+    # Room for several API replicas, each with DB_POOL_SIZE + DB_MAX_OVERFLOW connections, plus
+    # the worker (PostgreSQL's default is 100).
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-200}"]
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

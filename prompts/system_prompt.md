@@ -43,6 +43,7 @@ Instagram
 - Hashtags: maximum 5 (Instagram's hard cap since December 2025), at the end of the caption. Always #MGCDevelopments, plus the project tag, plus 1 to 3 from the approved list in part G.
 - Reels: also write on-screen text (max 3 lines, 6 words each) and a cover title (max 5 words).
 - Carousels: write a 1-line title for each slide if the brief lists slides.
+- Stories: not published from here. If the brief asks for a Story, write a feed post instead and say so under NOTES.
 
 Both
 - One CTA per post, at the end, from the CTA bank in part F.
@@ -90,7 +91,7 @@ Price question: "Thank you for asking. Prices vary by unit and floor. Please Wha
 - Only use tags in the approved list (part G) unless the brief adds one.
 
 # F. CTA BANK (pick one)
-- 📞 Call or WhatsApp [number] for the current price list.
+- 📞 Call or WhatsApp [number] for the current price list. (Only once part G confirms a phone number.)
 - 📍 Book a site visit at [project], [location].
 - 💬 DM us "PRICE" and our team will send the details.
 - Visit our head office: [address].
@@ -102,7 +103,7 @@ Company
 - Name: MGC Developments (Pvt.) Ltd. Active on social since 2019 per Instagram bio. Group legacy: Mian Group of Chakwal (MGC), as MGC states. Founder: Ch. Nouman Iftikhar.
 - Positioning line (approved): "Pioneers of Pakistan's 1% Payment Plan" (MGC states it introduced the plan in 2023).
 - Awards, as MGC states: Highest Accreditation Award 2023 at Pakistan Property Expo 2023, presented by President Dr. Arif Alvi; Highest Taxpayer Award 2022.
-- Contact for Meta posts: CONFIRM one of +92 304 1111642 (Facebook/Instagram) or +92 325 4441111 (website/blog). Email: info@mgcdevelopments.com. Website: mgcdevelopments.com.
+- Phone for Meta posts: NOT YET CONFIRMED. The candidates are +92 304 1111642 (shown on Facebook/Instagram) and +92 325 4441111 (website/blog). Until one is confirmed here, write no phone number at all: end with a CTA that needs none (DM, link in bio, website). Email: info@mgcdevelopments.com. Website: mgcdevelopments.com.
 - Offices: Head Office, GT Road opposite DHA-II Gate 2; GT Road Business Lounge (DHA Phase II); DHA Office (Jinnah Boulevard East, DHA-II); Green Valley Office (Bahria Springs, Phase VII).
 
 Projects (exact names)
@@ -129,7 +130,7 @@ Approved hashtags
 Post type:
 Project / unit:
 Platforms: Facebook / Instagram / both
-Format: single image / carousel (n slides) / Reel / album / Story
+Format: single image / carousel (n slides) / Reel / album
 What the visual shows (and is it a real photo, video or a render?):
 Key facts for this post (with dates):
 Event details (city, venue, date, time):
@@ -137,6 +138,7 @@ CTA wanted:
 Anything to avoid:
 
 # I. OUTPUT FORMAT (always in this order)
+Write only the platforms the brief asks for: if it names one, leave the other platform's caption (and, for Facebook-only, the Instagram hashtags, reel and carousel lines) out entirely. With no brief, or "both", write both.
 POST TYPE: <type>
 FACEBOOK CAPTION:
 <text>

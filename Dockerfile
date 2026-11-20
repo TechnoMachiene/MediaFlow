@@ -40,5 +40,8 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
     CMD python -c "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).status != 200)"
 # Open live-update streams (app/api/live.py) don't hold up a restart: after 5 s they are cut,
 # and browsers reconnect to the new process on their own.
+# Idle connections stay open 75 s (uvicorn's default is 5 s). nginx in front reuses its
+# connections to the API for up to 60 s; with the API closing them first, a request could be
+# sent on a connection the API had just closed: a 502, or a connection error for a client.
 CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", \
-     "--timeout-graceful-shutdown", "5"]
+     "--timeout-graceful-shutdown", "5", "--timeout-keep-alive", "75"]

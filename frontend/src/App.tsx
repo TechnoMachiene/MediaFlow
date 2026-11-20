@@ -1,6 +1,6 @@
 import { MotionConfig } from 'motion/react';
 import { connectLive } from './live';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError, api, auth, clearMedia } from './api';
 import { isAdmin, isReviewer, roleLabel } from './lib';
 import { SessionContext, useSession } from './session';
@@ -9,23 +9,27 @@ import { ToastProvider, useToast } from './toast';
 import type { Job, Me, Meta, User } from './types';
 import { Button, ConfirmButton, ErrorNote, Icon, Spinner, type IconName } from './ui';
 import { uploads } from './uploads';
-import { Activity } from './views/Activity';
-import { Audit } from './views/Audit';
-import { Calendar } from './views/Calendar';
 import { AcceptInvite, readInviteToken } from './views/Invite';
-import { Insights } from './views/Insights';
 import { JobSheet } from './views/JobSheet';
 import { Library } from './views/Library';
-import { Publishing, PublishingAuth, readPublishingAuth } from './views/Publishing';
+import { PublishingAuth, readPublishingAuth } from './views/Publishing';
 import { Login } from './views/Login';
 import { Notifications } from './views/Notifications';
-import { Review } from './views/Review';
-import { Settings } from './views/Settings';
-import { Team } from './views/Team';
+
+// Screens beyond the Library load when first opened, so signing in downloads only what the
+// first screen needs (admin screens, charts and the calendar come later, on demand).
+const Review = lazy(() => import('./views/Review').then((m) => ({ default: m.Review })));
+const Calendar = lazy(() => import('./views/Calendar').then((m) => ({ default: m.Calendar })));
+const Insights = lazy(() => import('./views/Insights').then((m) => ({ default: m.Insights })));
+const Publishing = lazy(() => import('./views/Publishing').then((m) => ({ default: m.Publishing })));
+const Team = lazy(() => import('./views/Team').then((m) => ({ default: m.Team })));
+const Activity = lazy(() => import('./views/Activity').then((m) => ({ default: m.Activity })));
+const Audit = lazy(() => import('./views/Audit').then((m) => ({ default: m.Audit })));
+const Settings = lazy(() => import('./views/Settings').then((m) => ({ default: m.Settings })));
 
 type Route = 'library' | 'review' | 'calendar' | 'insights' | 'publishing' | 'team' | 'activity'
   | 'audit' | 'settings';
-const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boolean; view: () => React.JSX.Element }[] = [
+const NAV: { id: Route; label: string; icon: IconName; allow: (u: User) => boolean; view: React.ComponentType }[] = [
   { id: 'library', label: 'Library', icon: 'library', allow: () => true, view: Library },
   { id: 'review', label: 'Review', icon: 'review', allow: (u) => isReviewer(u.role), view: Review },
   { id: 'calendar', label: 'Calendar', icon: 'calendar', allow: () => true, view: Calendar },
@@ -230,7 +234,9 @@ function Shell({ user, signOut }: { user: Me; signOut: () => void }) {
       </aside>
 
       <main className="main">
-        <div key={current.id} className="view"><View /></div>
+        <div key={current.id} className="view">
+          <Suspense fallback={<div className="center"><Spinner /></div>}><View /></Suspense>
+        </div>
       </main>
 
       <nav className="tabbar" aria-label="Main">

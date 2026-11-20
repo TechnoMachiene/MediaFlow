@@ -62,6 +62,11 @@ RECONCILER_ACTIONS = Counter(
     "mediaflow_reconciler_actions_total",
     "Repairs made by the DB<->Redis reconciler (see docs/JOB_LIFECYCLE.md).", ["action"],
 )
+OVERLOAD = Counter(
+    "mediaflow_overload_total",
+    "Requests turned away with 503 because a bounded resource was full (password_hashing, "
+    "database_pool). Rising: add API replicas, or raise DB_POOL_SIZE.", ["resource"],
+)
 PUBLISH_OUTCOMES = Counter(
     "mediaflow_publish_outcomes_total",
     "Publishing delivery outcomes by provider (published, processing, retry, rejected, "

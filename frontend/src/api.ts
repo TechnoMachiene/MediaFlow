@@ -81,7 +81,11 @@ function expire() {
   unauthorized();
 }
 
-export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** A busy server (503 with a short Retry-After) is retried once, after the wait it asks for,
+ * for reads and sign-in, which are safe to repeat. Writes show the "busy" message instead. */
+const RETRYABLE = (method: string, path: string) => method === 'GET' || path === '/auth/login';
+
+export async function api<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
   const headers = authHeaders();
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res: Response;
@@ -95,6 +99,13 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     throw new ApiError(0, OFFLINE);
   }
   if (res.status === 204) return undefined as T;
+  if (res.status === 503 && !retried && RETRYABLE(method, path)) {
+    const wait = Number(res.headers.get('Retry-After'));
+    if (wait > 0 && wait <= 5) {
+      await new Promise((r) => setTimeout(r, wait * 1000));
+      return api<T>(method, path, body, true);
+    }
+  }
   const data: unknown = await res.json().catch(() => null);
   if (!res.ok) {
     if (res.status === 401 && !path.startsWith('/auth/login')) expire();

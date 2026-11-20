@@ -62,7 +62,8 @@ def api(make_rt, tmp_path, monkeypatch):
     application, engine, sessions = build_app(runtime, tmp_path / "media")
     add_member(sessions, "owner@example.com")
     with TestClient(application) as client:
-        yield client, runtime, login(client, "owner@example.com")
+        # These tests are about waiting for the draft, which a client asks for explicitly.
+        yield client, runtime, {**login(client, "owner@example.com"), "Prefer": "wait=30"}
     engine.dispose()
 
 

@@ -28,6 +28,11 @@ services:
 
   api:
     ports: !reset []
+    # Behind the proxy the API isn't published, so it can run as several replicas: nginx
+    # spreads requests across them (Docker's DNS gives it every replica's address). Sign-in
+    # throttling, live updates and the job queue all live in Redis, so replicas share them.
+    deploy:
+      replicas: ${API_REPLICAS:-2}
     environment:
       # Only the proxy can reach the API now, so trust its X-Forwarded-For (which it overwrites
       # with the real client address) for the per-address sign-in throttle and the logs.

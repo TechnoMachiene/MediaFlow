@@ -132,3 +132,5 @@ originals that retention has since deleted.
 - [ ] Monitoring: `compose.observability.yaml`, or your own Prometheus on the metrics port
       ([OPERATIONS.md](OPERATIONS.md)); alerts reach someone
 - [ ] Certificate renewal is scheduled
+- [ ] Capacity: `API_REPLICAS` and the pool sized for the server (OPERATIONS.md, "Capacity");
+      the burst benchmark re-run on a demo stack on the same hardware

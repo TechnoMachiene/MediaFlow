@@ -90,3 +90,15 @@ def test_anything_else_is_kept_as_it_came(reply):
 
 def test_normalize_writes_json_the_app_reads():
     assert json.loads(normalize(REEL))["instagram"]["cover_title"] == "25 of 27 floors"
+
+
+@pytest.mark.parametrize(("reply", "sections"), [
+    ("POST TYPE: Spotlight\nINSTAGRAM CAPTION:\nHotel suites at MGC Jewel.\n"
+     "INSTAGRAM HASHTAGS (max 5):\n#MGCDevelopments #MGCJewel\nALT TEXT:\nA hotel suite.\n",
+     {"instagram", "content_summary"}),
+    ("POST TYPE: Spotlight\nFACEBOOK CAPTION:\nHotel suites at MGC Jewel.\n"
+     "ALT TEXT:\nA hotel suite.\nNOTES: Instagram not requested.\n",
+     {"facebook", "content_summary"}),
+])
+def test_a_brief_for_one_platform_gives_a_draft_for_that_platform_only(reply, sections):
+    assert set(to_draft(reply)) == sections

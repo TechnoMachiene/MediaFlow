@@ -123,6 +123,11 @@ def current_member(
         )
     role, ws_id, ws_name = row
     request.state.workspace_id = ws_id
+    # Give the connection back now. Between this check and the route itself the request may
+    # queue for a free thread; holding a connection meanwhile let a burst of requests take
+    # more connections than there are threads to use them (docs/OPERATIONS.md, "Capacity").
+    # Nothing is written here, and expire_on_commit=False keeps `user` loaded.
+    db.commit()
     return Member(user=user, workspace_id=ws_id, workspace_name=ws_name,
                   role=effective_role(user, role))
 

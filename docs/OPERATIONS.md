@@ -265,3 +265,66 @@ the worker both publish.
   removed member stops hearing within that time. A restart cuts streams after 5 seconds
   (`--timeout-graceful-shutdown`); browsers reconnect on their own.
 - Watch: `redis-cli PUBSUB NUMSUB <prefix>:live:ws:<workspace>` shows how many tabs listen.
+
+## Capacity
+
+Measured on a 4-CPU machine with the demo stack (`python scripts/load_test.py`, 100 requests
+at once per scenario, client on the same machine):
+
+| 100 at once | Before (Nov 2026 review) | 1 API replica | 3 API replicas |
+|---|---|---|---|
+| `GET /health/live` | 100/100 | 100/100 | 100/100, avg 0.1 s |
+| `GET /auth/me` | 100/100, avg 0.65-1.2 s | 100/100, avg 0.76 s | 100/100, avg 0.77 s |
+| `POST /auth/login` | 70-75/100, the rest **500**, up to 67 s | **100/100**, max 9 s | 100/100, max 11 s |
+| `POST /jobs` (upload) | **0/100** (500s and 2-minute timeouts) | **100/100**, avg 2.8 s | **100/100**, avg 1.5 s |
+
+What changed, and why:
+
+- **Sign-in releases its database connection before checking the password.** Argon2 is slow
+  on purpose (about 110 ms of all four CPUs per check at the recommended settings); holding a
+  connection through it is what exhausted the pool.
+- **At most `PASSWORD_HASH_CONCURRENCY` password checks run at once** (default: the CPUs the
+  container may use, read from its cgroup limit: `os.cpu_count()` reports the host's, which
+  over-committed a CPU-limited container), each using 64 MiB. A sign-in waits its turn in an
+  async queue that holds no request thread, up to `PASSWORD_HASH_WAIT_S` (30 s), then gets
+  **503** with `Retry-After`; the web app retries once. An unknown email is checked against a
+  stand-in hash, so its response time doesn't reveal which addresses have accounts.
+- **Sign-in throughput is set by CPU, on purpose:** one check takes about 110 ms of 4 CPUs, or
+  about 0.5 s on 1 CPU. 100 people signing in at the same moment on a 1-CPU API need about
+  50 s: measured with the API limited to 1 CPU, 59 of 100 got in within the 30 s wait, and all
+  100 with the web app's retry (the last after 61 s). More CPUs per API replica is what makes
+  this faster; lowering Argon2's cost would too, at the price of weaker password storage.
+- **Every request releases its connection after the sign-in check**, before it may queue for a
+  thread, so a burst can't hold more connections than there are threads to use them.
+- **Uploads answer at once (202)**. Waiting for the draft held a thread per upload for up to
+  five minutes; a client that wants it sends `Prefer: wait=N` (at most 300). The web app never
+  needed it: it hears about the draft through live updates.
+- **A full pool answers 503 with `Retry-After` within `DB_POOL_TIMEOUT`**, never a 500 after
+  30 s. The web app retries reads and sign-in once, after the wait the server asks for.
+- `mediaflow_overload_total{resource}` counts those 503s (`password_hashing`,
+  `database_pool`). If it climbs, add replicas or raise the pool.
+
+### Settings (per API process)
+
+| Setting | Default | What it is |
+|---|---|---|
+| `API_THREADS` | 40 | Requests that run at once |
+| `DB_POOL_SIZE` + `DB_MAX_OVERFLOW` | 20 + 20 | Connections; keep the sum at least `API_THREADS` |
+| `DB_POOL_TIMEOUT` | 10 s | How long a request waits for a connection before 503 |
+| `PASSWORD_HASH_CONCURRENCY` | CPUs allowed | Password checks at once (64 MiB each) |
+| `PASSWORD_HASH_WAIT_S` | 30 s | How long a sign-in waits its turn before 503 |
+| `API_REPLICAS` | 2 | API containers behind the HTTPS proxy (`compose.proxy.yaml`) |
+| `POSTGRES_MAX_CONNECTIONS` | 200 | Keep above replicas x (pool + overflow) + the worker's |
+
+### Scaling out
+
+Behind the proxy (`compose.proxy.yaml`), the API runs as `API_REPLICAS` containers. nginx
+re-reads Docker's DNS every 10 seconds, spreads requests across replicas, and skips one that is
+restarting within 3 seconds; it never re-sends an upload that reached a replica. Everything
+replicas share lives in Redis or PostgreSQL (sign-in throttling, live updates, the job queue),
+so any number can run. On one machine, replicas share its CPUs: they help uploads and
+database-bound requests most, and a server with more cores gains more. Sign-ins are bound by
+CPU however many replicas run.
+
+Re-run the benchmark after changing any of this, against a demo stack only (it signs in with
+the demo accounts and creates jobs): `python scripts/load_test.py http://localhost:8081`.

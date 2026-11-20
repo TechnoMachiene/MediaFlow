@@ -73,3 +73,30 @@ describe('api client', () => {
     ]);
   });
 });
+
+describe('a busy server', () => {
+  it('retries a read once after the wait it asks for, but never a write', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit = {}) => {
+      calls += 1;
+      if ((init.method ?? 'GET') === 'GET' && calls === 1) {
+        return new Response(JSON.stringify({ detail: 'busy' }), { status: 503, headers: { 'Retry-After': '1' } });
+      }
+      if ((init.method ?? 'GET') === 'POST') {
+        return new Response(JSON.stringify({ detail: 'The server is busy. Try again in a moment.' }),
+          { status: 503, headers: { 'Retry-After': '1' } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }));
+    const read = api<{ ok: boolean }>('GET', '/stats');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await read).toEqual({ ok: true });
+    expect(calls).toBe(2);
+
+    calls = 0;
+    await expect(api('POST', '/jobs/j1/submit')).rejects.toThrow('The server is busy');
+    expect(calls).toBe(1);
+    vi.useRealTimers();
+  });
+});

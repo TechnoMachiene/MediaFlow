@@ -4,6 +4,7 @@ import io
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -214,7 +215,7 @@ def test_post_job_waits_and_returns_analysis(api_client, monkeypatch):
     try:
         uploaded = client.post(
             "/api/v1/jobs",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "Prefer": "wait=5"},
             files={"file": ("cat.png", sample_image(), "image/png")},
         )
     finally:
@@ -226,6 +227,19 @@ def test_post_job_waits_and_returns_analysis(api_client, monkeypatch):
     body = uploaded.json()
     assert body["status"] == "done"
     assert "scripted analysis" in body["result"]["text"]
+
+
+def test_post_job_answers_at_once_unless_asked_to_wait(api_client):
+    client, _ = api_client
+    _, token = create_account(client, "post-nowait@example.com")
+    started = time.monotonic()
+    uploaded = client.post(
+        "/api/v1/jobs",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("cat.png", sample_image(), "image/png")},
+    )
+    assert uploaded.status_code == 202 and uploaded.json()["status"] == "queued"
+    assert time.monotonic() - started < 2  # no worker running, and no waiting for one
 
 
 def test_post_job_returns_accepted_if_worker_has_not_finished(api_client, monkeypatch):
@@ -253,7 +267,7 @@ def test_post_job_reports_worker_failure_with_error(api_client, monkeypatch):
     try:
         uploaded = client.post(
             "/api/v1/jobs",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "Prefer": "wait=5"},
             files={"file": ("cat.png", sample_image(), "image/png")},
         )
     finally:
@@ -635,7 +649,8 @@ def test_uploads_reuse_identical_media_and_preserve_original_names(api_client, m
     assert duplicate_job.json()["original_filename"] == "renamed-copy.png"
     assert len(list(media_dir.iterdir())) == 1
     stored_name = next(media_dir.iterdir()).name
-    assert stored_name == "campaign.png"
+    # The first upload's name, plus a fingerprint of the content (app/storage.py, _reserve).
+    assert stored_name.startswith("campaign-") and stored_name.endswith(".png")
     assert client.get(first_job.json()["media_url"], headers=headers).content == (
         client.get(duplicate_job.json()["media_url"], headers=headers).content
     )
@@ -661,9 +676,8 @@ def test_same_original_name_with_different_content_is_not_overwritten(api_client
         job_ids.append(response.json()["job_id"])
 
     filenames = {path.name for path in media_dir.iterdir()}
-    assert "same-name.png" in filenames
-    assert len(filenames) == 2
-    assert any(name.startswith("same-name-") and name.endswith(".png") for name in filenames)
+    assert len(filenames) == 2  # two different files kept, neither overwritten
+    assert all(name.startswith("same-name-") and name.endswith(".png") for name in filenames)
     assert all(
         client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["original_filename"]
         == "same-name.png"
@@ -881,3 +895,24 @@ def test_built_frontend_is_served_without_shadowing_the_api(tmp_path):
     without = TestClient(create_app(frontend_dir=tmp_path / "missing"))
     assert without.get("/").status_code == 404
     assert without.get("/health/live").status_code == 200
+
+
+def test_a_deleted_originals_name_is_never_reused_for_other_bytes(api_client, make_image):
+    """A deleted original's record keeps its stored name; a new upload with the same file
+    name but other bytes must not collide with it (it once caused a 500 under load)."""
+    client, runtime = api_client
+    _, token = create_account(client, "reuse-name@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def send(color):
+        path = Path(make_image(name="same.png", color=color))
+        response = client.post("/api/v1/jobs", headers=headers,
+                               files={"file": ("same.png", path.read_bytes(), "image/png")})
+        assert response.status_code in {200, 202}, response.text
+        runtime.worker.drain()
+        return response.json()["job_id"]
+
+    first = send((10, 20, 30))
+    assert client.delete(f"/api/v1/jobs/{first}/media", headers=headers).status_code == 204
+    second = send((40, 50, 60))
+    assert client.get(f"/api/v1/jobs/{second}", headers=headers).status_code == 200

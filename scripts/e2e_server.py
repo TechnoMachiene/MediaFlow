@@ -36,7 +36,9 @@ def main(port: str = "8093") -> int:
             "ALLOW_SIGNUP": "0", "LOG_FORMAT": "text", "LOG_LEVEL": "WARNING",
         }
         server = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "app.api.main:app", "--port", port],
+            # Same keep-alive as the image (Dockerfile): idle connections aren't cut at 5 s.
+            [sys.executable, "-m", "uvicorn", "app.api.main:app", "--port", port,
+             "--timeout-keep-alive", "75"],
             cwd=ROOT, env=env,
         )
 

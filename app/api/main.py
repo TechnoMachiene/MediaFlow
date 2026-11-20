@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio.to_thread
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from app.api import live
 from app.api.analytics import router as analytics_router
@@ -30,6 +34,7 @@ from app.api.media_links import router as media_links_router
 from app.api.notifications import router as notifications_router
 from app.api.publishing import router as publishing_router
 from app.api.routes import router
+from app.api.security import HashingBusy
 from app.api.throttle import Throttle
 from app.api.worker_setup import configure_worker
 from app.api.workspaces import router as workspaces_router
@@ -37,9 +42,18 @@ from app.config import Settings
 from app.obs import metrics
 from app.obs.http import ObservabilityMiddleware
 from app.obs.logs import configure_logging
+from app.obs.metrics import OVERLOAD
 from app.obs.tracing import configure_tracing, instrument_app, instrument_engine
 from app.publishing.registry import build_providers
 from app.wiring import Runtime, build_runtime
+
+
+def api_threads() -> int:
+    try:
+        return max(4, int(os.environ.get("API_THREADS", "").strip() or 40))
+    except ValueError:
+        return 40
+
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 log = logging.getLogger("api")
@@ -58,6 +72,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         load_dotenv()
+        # Requests run on a thread pool (FastAPI's sync routes). API_THREADS caps how many run
+        # at once per process (default 40, as before); keep DB_POOL_SIZE + DB_MAX_OVERFLOW
+        # at least this, so a running request doesn't wait for a connection.
+        anyio.to_thread.current_default_thread_limiter().total_tokens = api_threads()
         configure_logging("mediaflow-api")
         configure_tracing("mediaflow-api")
         cfg = api_settings or ApiSettings.from_env()
@@ -133,6 +151,24 @@ def create_app(
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # Overload is answered quickly and honestly: 503 with Retry-After, never a 500 after a
+    # 30-second wait. The browser and API clients can simply try again a moment later.
+    @application.exception_handler(HashingBusy)
+    async def _hashing_busy(_request: Request, _exc: HashingBusy):
+        OVERLOAD.labels("password_hashing").inc()
+        return JSONResponse(
+            {"detail": "Lots of people are signing in right now. Try again in a moment."},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": "2"})
+
+    @application.exception_handler(PoolTimeout)
+    async def _database_busy(_request: Request, _exc: PoolTimeout):
+        OVERLOAD.labels("database_pool").inc()
+        log.warning("database pool exhausted: raise DB_POOL_SIZE or add API replicas")
+        return JSONResponse(
+            {"detail": "The server is busy. Try again in a moment."},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": "2"})
+
     application.include_router(router)
     application.include_router(workspaces_router)
     application.include_router(audit_router)

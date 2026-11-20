@@ -77,8 +77,11 @@ class LocalStorage:
         original = safe_filename(original_filename)
         stem, suffix = os.path.splitext(original)
         max_stem = 255 - len(suffix) - 65
+        # Always carry a fingerprint of the content. The bare original name was tried first
+        # once; but a deleted original's record keeps its name while the file is gone, so a
+        # different upload with the same name could take that name and collide with the
+        # record (a 500 under load). Same bytes still get the same name.
         candidates = [
-            original,
             f"{stem[:max_stem]}-{sha256[:8]}{suffix}",
             f"{stem[:max_stem]}-{sha256}{suffix}",
         ]

@@ -34,6 +34,7 @@ x-app: &app
 services:
   postgres:
     image: postgres:17-alpine
+    command: ["postgres", "-c", "max_connections=200"]
     restart: unless-stopped
     environment: { POSTGRES_USER: mediaflow, POSTGRES_PASSWORD: mediaflow, POSTGRES_DB: mediaflow }
     volumes: [pgdata:/var/lib/postgresql/data]

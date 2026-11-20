@@ -64,7 +64,11 @@ def store_media_asset(
             select(MediaAsset).where(MediaAsset.sha256 == sha256).with_for_update()
         )
         if existing is None:
-            storage.delete(key)
+            # Not the same bytes: the name itself collided with another record. Never delete
+            # a file another record may point at; the fingerprinted names make this all but
+            # impossible (app/storage.py, _reserve).
+            if not db.scalar(select(MediaAsset.sha256).where(MediaAsset.stored_filename == key)):
+                storage.delete(key)
             raise
         if existing.stored_filename != key:
             storage.delete(key)

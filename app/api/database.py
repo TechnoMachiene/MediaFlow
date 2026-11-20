@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -522,7 +523,10 @@ TERMINAL_STATUSES = frozenset({"done", "failed", "dead", "cancelled", "expired"}
 
 def create_database(url: str):
     if url.startswith("sqlite"):
-        engine = create_engine(url, connect_args={"check_same_thread": False})
+        # A file database (demo, browser tests) gets the same pool sizing as PostgreSQL, so a
+        # burst isn't turned away by SQLite's small default pool. In-memory ones keep theirs.
+        pooled = pool_settings() if ":memory:" not in url and url != "sqlite://" else {}
+        engine = create_engine(url, connect_args={"check_same_thread": False}, **pooled)
 
         @event.listens_for(engine, "connect")
         def _sqlite_pragmas(dbapi_connection, _record):  # pragma: no cover - driver hook
@@ -532,5 +536,30 @@ def create_database(url: str):
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
     else:
-        engine = create_engine(url, pool_pre_ping=True)
+        engine = create_engine(url, pool_pre_ping=True, **pool_settings())
     return engine, sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def pool_settings() -> dict:
+    """PostgreSQL connection pool per process (API replica or worker), from the environment.
+
+    DB_POOL_SIZE kept open (default 20) + DB_MAX_OVERFLOW extra under load (default 20) =
+    the most this process opens. Size it to the API's thread count (API_THREADS, default 40)
+    so a request rarely waits, and keep replicas x (size + overflow) + worker below
+    PostgreSQL's max_connections (compose.yaml sets 200). A request that still can't get a
+    connection within DB_POOL_TIMEOUT seconds (default 10) gets a 503 "busy", not a 500.
+    """
+    def num(name: str, default: int, low: int = 0) -> int:
+        try:
+            return max(low, int(os.environ.get(name, "").strip() or default))
+        except ValueError:
+            return default
+
+    return {
+        "pool_size": num("DB_POOL_SIZE", 20, 1),
+        "max_overflow": num("DB_MAX_OVERFLOW", 20),
+        "pool_timeout": num("DB_POOL_TIMEOUT", 10, 1),
+        # Close connections older than this, so a database failover or a proxy's idle cut
+        # never hands out a dead one.
+        "pool_recycle": num("DB_POOL_RECYCLE", 1800, 60),
+    }
